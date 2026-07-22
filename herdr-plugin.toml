@@ -1,0 +1,45 @@
+id = "ray.herdr-question"
+name = "Herdr Question"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "Answer blocked Claude and Codex questions from one focused herdr popup."
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["node", "-e", "const major = Number(process.versions.node.split('.')[0]); if (major < 22) { console.error('Node.js >= 22 required'); process.exit(1); }"]
+
+[[panes]]
+id = "question"
+title = "Herdr Question"
+placement = "popup"
+width = 82
+height = 26
+command = ["node", "bin/popup.mjs"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["node", "bin/event.mjs"]
+
+[[actions]]
+id = "open"
+title = "Herdr Question: Open pending queue"
+contexts = ["global", "workspace", "pane"]
+command = ["bash", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin ray.herdr-question --entrypoint question --placement popup --focus"]
+
+[[actions]]
+id = "install-hooks"
+title = "Herdr Question: Install or repair hooks"
+contexts = ["global", "workspace"]
+command = ["node", "bin/install-hooks.mjs"]
+
+[[actions]]
+id = "hook-status"
+title = "Herdr Question: Show hook status"
+contexts = ["global", "workspace"]
+command = ["node", "bin/status.mjs"]
+
+[[actions]]
+id = "uninstall-hooks"
+title = "Herdr Question: Uninstall hooks"
+contexts = ["global", "workspace"]
+command = ["node", "bin/uninstall-hooks.mjs"]

@@ -1,0 +1,96 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { normalizeRequest, requestId, safeDiagnostic, validateResponse } from '../src/schema.mjs';
+
+test('request IDs are stable for canonical input', () => {
+  const unordered = requestId({
+    paneId: 'w1:p1',
+    sessionId: 's1',
+    event: 'PermissionRequest',
+    input: { b: 2, a: 1 },
+  });
+  const ordered = requestId({
+    event: 'PermissionRequest',
+    input: { a: 1, b: 2 },
+    paneId: 'w1:p1',
+    sessionId: 's1',
+  });
+
+  assert.equal(unordered, ordered);
+  assert.equal(ordered, 'c683816efe34278a3bd78c04e8a9f24a91eab88fe454c65daaaceff05594caa2');
+});
+
+test('response must target the exact request', () => {
+  assert.throws(
+    () => validateResponse({ schema_version: 1, request_id: 'other', action: 'answer', value: {} }, 'expected'),
+    /request_id/,
+  );
+});
+
+test('unknown transports are rejected', () => {
+  assert.throws(() => normalizeRequest({
+    schema_version: 1,
+    request_id: 'r1',
+    source: { pane_id: 'w1:p1', agent: 'claude' },
+    kind: 'question',
+    transport: 'magic',
+  }), /transport/);
+});
+
+test('request normalization enforces the identity contract and returns an isolated value', () => {
+  const valid = {
+    schema_version: 1,
+    request_id: 'r1',
+    created_at_ms: 10,
+    source: { pane_id: 'w1:p1', agent: 'claude' },
+    kind: 'question',
+    transport: 'hook-response',
+    status: 'waiting',
+  };
+
+  assert.throws(() => normalizeRequest({ ...valid, schema_version: 2 }), /schema_version/);
+  assert.throws(() => normalizeRequest({ ...valid, kind: 'message' }), /kind/);
+  assert.throws(() => normalizeRequest({ ...valid, source: {} }), /identity/);
+  const normalized = normalizeRequest(valid);
+  normalized.source.agent = 'codex';
+  assert.equal(valid.source.agent, 'claude');
+});
+
+test('response validation accepts only exact versioned actions', () => {
+  const valid = { schema_version: 1, request_id: 'r1', action: 'handoff', value: null, created_at_ms: 11 };
+  assert.equal(validateResponse(valid, 'r1').action, 'handoff');
+  assert.throws(() => validateResponse({ ...valid, schema_version: 2 }, 'r1'), /schema_version/);
+  assert.throws(() => validateResponse({ ...valid, action: 'allow' }, 'r1'), /action/);
+});
+
+test('safe diagnostics omit request content and answers', () => {
+  const diagnostic = safeDiagnostic({
+    schema_version: 1,
+    request_id: 'r1',
+    created_at_ms: 10,
+    source: { agent: 'claude', pane_id: 'w1:p1', workspace_id: 'w1', env: { TOKEN: 'secret' } },
+    kind: 'permission',
+    transport: 'hook-response',
+    status: 'waiting',
+    title: 'Run secret command',
+    detail: { command: 'private' },
+    questions: [{ question: 'private' }],
+    permission: { command: 'private' },
+    answer: 'private',
+    outcome: 'handoff',
+  });
+
+  assert.deepEqual(diagnostic, {
+    schema_version: 1,
+    request_id: 'r1',
+    created_at_ms: 10,
+    agent: 'claude',
+    pane_id: 'w1:p1',
+    workspace_id: 'w1',
+    kind: 'permission',
+    transport: 'hook-response',
+    status: 'waiting',
+    outcome: 'handoff',
+  });
+});
