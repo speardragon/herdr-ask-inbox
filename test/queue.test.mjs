@@ -229,7 +229,7 @@ test('an abandoned legacy recovery guard cannot block concurrent popup recovery'
     maximumActive = Math.max(maximumActive, active);
     await new Promise((resolve) => setTimeout(resolve, 5));
     active -= 1;
-  }, { timeoutMs: 500 })));
+  }, { timeoutMs: 2_000 })));
   assert.equal(maximumActive, 1);
 });
 
@@ -249,6 +249,29 @@ test('leftover stale quarantine cannot create an unbounded recovery loop', { tim
     await queue.withPopupLock(async () => 'recovered', { timeoutMs: 500 }),
     'recovered',
   );
+});
+
+test('owner publication survives concurrent stale recovery pressure', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-owner-race-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const staleOwner = { pid: 999_999_999, created_at_ms: 0, token: 'stale-owner' };
+  await seedJson(root, 'locks/popup.lock', 'owner', staleOwner);
+  await seedJson(root, 'locks/popup.lock.stale', 'owner', staleOwner);
+  const queue = await openQueue(root);
+  let active = 0;
+  let maximumActive = 0;
+  let completed = 0;
+
+  await Promise.all(Array.from({ length: 64 }, () => queue.withPopupLock(async () => {
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    completed += 1;
+    active -= 1;
+  }, { timeoutMs: 5_000 })));
+
+  assert.equal(completed, 64);
+  assert.equal(maximumActive, 1);
 });
 
 test('startup recovers abandoned request and response claims without reviving completion', async (t) => {

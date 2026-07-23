@@ -22,6 +22,7 @@ const PROCESS_STARTED_AT_MS = Math.round(Date.now() - process.uptime() * 1_000);
 const TOMBSTONE_MIN_RETENTION_MS = 60 * 60 * 1_000;
 const TOMBSTONE_MAX_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const TOMBSTONE_MAX_COUNT = 128;
+const LOCAL_LOCK_TAILS = new Map();
 
 function processIsAbsent(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return true;
@@ -174,7 +175,43 @@ class Queue {
     };
   }
 
-  async withDirectoryLock(lockDirectory, callback, { timeoutMs = 2_000 } = {}) {
+  async withDirectoryLock(lockDirectory, callback, options) {
+    const timeoutMs = options?.timeoutMs ?? 2_000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error('timeoutMs must be a non-negative number');
+    const startedAt = Date.now();
+    const previous = LOCAL_LOCK_TAILS.get(lockDirectory) ?? Promise.resolve();
+    let release;
+    const turn = new Promise((resolve) => {
+      release = resolve;
+    });
+    LOCAL_LOCK_TAILS.set(lockDirectory, turn);
+    void turn.then(() => {
+      if (LOCAL_LOCK_TAILS.get(lockDirectory) === turn) LOCAL_LOCK_TAILS.delete(lockDirectory);
+    });
+
+    let entered = false;
+    try {
+      let timer;
+      await Promise.race([
+        previous.catch(() => {}),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const error = new Error('lock acquisition timed out');
+            error.code = 'QUEUE_LOCK_TIMEOUT';
+            reject(error);
+          }, timeoutMs);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      entered = true;
+      const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
+      return await this.acquireDirectoryLock(lockDirectory, callback, { timeoutMs: remainingMs });
+    } finally {
+      if (entered) release();
+      else void previous.finally(release);
+    }
+  }
+
+  async acquireDirectoryLock(lockDirectory, callback, { timeoutMs = 2_000 } = {}) {
     if (typeof callback !== 'function') throw new Error('lock callback is required');
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error('timeoutMs must be a non-negative number');
 
@@ -199,6 +236,11 @@ class Queue {
       }
       try {
         await mkdir(lockDirectory, { mode: 0o700 });
+        const acquiredStat = await lstat(lockDirectory).catch((error) => {
+          if (error.code === 'ENOENT') return null;
+          throw error;
+        });
+        if (!acquiredStat) continue;
         try {
           await atomicWriteJson(lockDirectory, 'owner.json', {
             pid: process.pid,
@@ -207,10 +249,18 @@ class Queue {
             nonce,
           });
         } catch (error) {
-          const failedDirectory = `${lockDirectory}.failed.${process.pid}.${randomUUID()}`;
-          await rename(lockDirectory, failedDirectory).catch(() => {});
-          await rm(failedDirectory, { recursive: true, force: true }).catch(() => {});
+          if (error.code === 'ENOENT') continue;
           throw error;
+        }
+        const publishedStat = await lstat(lockDirectory).catch(() => null);
+        const publishedOwner = await readJson(ownerPath).catch(() => null);
+        if (
+          !publishedStat
+          || acquiredStat.dev !== publishedStat.dev
+          || acquiredStat.ino !== publishedStat.ino
+          || publishedOwner?.nonce !== nonce
+        ) {
+          continue;
         }
         await rm(staleDirectory, { recursive: true, force: true });
         break;
@@ -235,7 +285,23 @@ class Queue {
           } catch (renameError) {
             if (renameError.code !== 'ENOENT') throw renameError;
           }
-          await rm(quarantine, { recursive: true, force: true });
+          const quarantinedStat = await lstat(quarantine).catch(() => null);
+          let quarantinedOwner = null;
+          try {
+            quarantinedOwner = await readJson(join(quarantine, 'owner.json'));
+          } catch (readError) {
+            if (readError.code !== 'ENOENT' && !(readError instanceof SyntaxError)) throw readError;
+          }
+          const movedObservedLock = quarantinedStat
+            && quarantinedStat.dev === lockStat.dev
+            && quarantinedStat.ino === lockStat.ino;
+          if (movedObservedLock && lockIsStale(quarantinedOwner, quarantinedStat)) {
+            await rm(quarantine, { recursive: true, force: true });
+          } else if (quarantinedStat) {
+            await rename(quarantine, lockDirectory).catch((restoreError) => {
+              if (!['EEXIST', 'ENOTEMPTY'].includes(restoreError.code)) throw restoreError;
+            });
+          }
           continue;
         }
 
