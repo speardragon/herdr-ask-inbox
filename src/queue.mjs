@@ -185,6 +185,11 @@ class Queue {
     const deadline = Date.now() + timeoutMs;
 
     while (true) {
+      if (Date.now() >= deadline) {
+        const timeoutError = new Error('lock acquisition timed out');
+        timeoutError.code = 'QUEUE_LOCK_TIMEOUT';
+        throw timeoutError;
+      }
       if (await exists(legacyRecoveryDirectory)) {
         const legacyQuarantine = `${legacyRecoveryDirectory}.legacy.${process.pid}.${randomUUID()}`;
         await rename(legacyRecoveryDirectory, legacyQuarantine).catch((error) => {
@@ -224,11 +229,13 @@ class Queue {
         if (!lockStat || before.dev !== lockStat.dev || before.ino !== lockStat.ino) continue;
 
         if (lockStat && lockIsStale(owner, lockStat)) {
+          const quarantine = `${lockDirectory}.stale.${process.pid}.${randomUUID()}`;
           try {
-            await rename(lockDirectory, staleDirectory);
+            await rename(lockDirectory, quarantine);
           } catch (renameError) {
-            if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(renameError.code)) throw renameError;
+            if (renameError.code !== 'ENOENT') throw renameError;
           }
+          await rm(quarantine, { recursive: true, force: true });
           continue;
         }
 

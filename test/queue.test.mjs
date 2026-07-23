@@ -233,6 +233,24 @@ test('an abandoned legacy recovery guard cannot block concurrent popup recovery'
   assert.equal(maximumActive, 1);
 });
 
+test('leftover stale quarantine cannot create an unbounded recovery loop', { timeout: 750 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-stale-quarantine-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const staleOwner = {
+    pid: 999_999_999,
+    created_at_ms: 0,
+    token: 'stale-owner',
+  };
+  await seedJson(root, 'locks/popup.lock', 'owner', staleOwner);
+  await seedJson(root, 'locks/popup.lock.stale', 'owner', staleOwner);
+  const queue = await openQueue(root);
+
+  assert.equal(
+    await queue.withPopupLock(async () => 'recovered', { timeoutMs: 500 }),
+    'recovered',
+  );
+});
+
 test('startup recovers abandoned request and response claims without reviving completion', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'herdr-question-fault-'));
   t.after(() => rm(root, { recursive: true, force: true }));
