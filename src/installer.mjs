@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
 import {
   chmod,
+  lstat,
   mkdir,
   open,
   readFile,
@@ -71,19 +73,21 @@ async function ensureParent(path) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 }
 
-async function atomicWrite(path, bytes, mode) {
+async function atomicWrite(path, bytes, mode, { expectedSnapshot } = {}) {
   await ensureParent(path);
   const temporaryPath = join(dirname(path), `.${path.split('/').at(-1)}.${process.pid}.${randomUUID()}.tmp`);
   try {
     const handle = await open(temporaryPath, 'wx', mode);
     try {
       await handle.writeFile(bytes);
+      await handle.chmod(mode);
       await handle.sync();
     } finally {
       await handle.close();
     }
+    if (expectedSnapshot) await assertSnapshotUnchanged(path, expectedSnapshot);
     await rename(temporaryPath, path);
-    await chmod(path, mode);
+    return await snapshotFile(path);
   } catch (error) {
     await unlink(temporaryPath).catch(() => {});
     throw error;
@@ -114,34 +118,130 @@ async function backupOriginal(path, bytes) {
   }
 }
 
-async function readConfig(path) {
-  try {
-    const bytes = await readFile(path);
-    return { bytes, value: JSON.parse(bytes.toString('utf8')), exists: true };
-  } catch (error) {
-    if (error?.code === 'ENOENT') return { bytes: null, value: {}, exists: false };
-    throw error;
-  }
+function unsafePathError(path, detail = 'is a symbolic link') {
+  const error = new Error(`${path} ${detail}; refusing to modify agent settings`);
+  error.code = 'HERDR_QUESTION_UNSAFE_PATH';
+  return error;
+}
+
+function conflictError(path) {
+  const error = new Error(`${path} changed during hook transaction; refusing to overwrite external settings`);
+  error.code = 'HERDR_QUESTION_CONFLICT';
+  return error;
 }
 
 async function snapshotFile(path) {
+  let pathMetadata;
   try {
-    const [bytes, metadata] = await Promise.all([readFile(path), stat(path)]);
-    return { bytes, mode: metadata.mode & 0o777, exists: true };
+    pathMetadata = await lstat(path, { bigint: true });
   } catch (error) {
     if (error?.code === 'ENOENT') return { bytes: null, mode: null, exists: false };
     throw error;
   }
+  if (pathMetadata.isSymbolicLink()) throw unsafePathError(path);
+  if (!pathMetadata.isFile()) throw unsafePathError(path, 'is not a regular file');
+  let handle;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if (error?.code === 'ELOOP') throw unsafePathError(path);
+    throw error;
+  }
+  try {
+    const metadata = await handle.stat({ bigint: true });
+    if (!metadata.isFile()) throw unsafePathError(path, 'is not a regular file');
+    const bytes = await handle.readFile();
+    const current = await lstat(path, { bigint: true });
+    if (current.isSymbolicLink()) throw unsafePathError(path);
+    if (current.dev !== metadata.dev || current.ino !== metadata.ino) {
+      const error = new Error(`${path} changed while agent settings were being read`);
+      error.code = 'HERDR_QUESTION_CONFLICT';
+      throw error;
+    }
+    return {
+      bytes,
+      mode: Number(metadata.mode & 0o777n),
+      dev: metadata.dev.toString(),
+      ino: metadata.ino.toString(),
+      exists: true,
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
-async function restoreFile(path, snapshot) {
-  if (snapshot.exists) {
-    await atomicWrite(path, snapshot.bytes, snapshot.mode);
-    return;
+function snapshotsMatch(actual, expected, { includeMode = false } = {}) {
+  if (actual.exists !== expected.exists) return false;
+  if (!actual.exists) return true;
+  return actual.dev === expected.dev
+    && actual.ino === expected.ino
+    && actual.bytes.equals(expected.bytes)
+    && (!includeMode || actual.mode === expected.mode);
+}
+
+async function assertSnapshotUnchanged(path, expected, options) {
+  let current;
+  try {
+    current = await snapshotFile(path);
+  } catch (error) {
+    if (error?.code === 'HERDR_QUESTION_UNSAFE_PATH' || error?.code === 'HERDR_QUESTION_CONFLICT') {
+      throw conflictError(path);
+    }
+    throw error;
   }
-  await unlink(path).catch((error) => {
+  if (!snapshotsMatch(current, expected, options)) throw conflictError(path);
+  return current;
+}
+
+async function safeChmod(path, mode, expected) {
+  await assertSnapshotUnchanged(path, expected, { includeMode: true });
+  let handle;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if (error?.code === 'ELOOP') throw conflictError(path);
+    throw error;
+  }
+  try {
+    const metadata = await handle.stat({ bigint: true });
+    if (metadata.dev.toString() !== expected.dev || metadata.ino.toString() !== expected.ino) {
+      throw conflictError(path);
+    }
+    await handle.chmod(mode);
+  } finally {
+    await handle.close();
+  }
+  return snapshotFile(path);
+}
+
+async function restoreMutation(mutation) {
+  let current;
+  try {
+    current = await snapshotFile(mutation.path);
+  } catch (error) {
+    if (error?.code === 'HERDR_QUESTION_UNSAFE_PATH' || error?.code === 'HERDR_QUESTION_CONFLICT') {
+      return false;
+    }
+    throw error;
+  }
+  const stillOwned = mutation.expectedAfter
+    ? snapshotsMatch(current, mutation.expectedAfter, { includeMode: true })
+    : mutation.expectedExists === false
+      ? !current.exists
+      : current.exists && Buffer.isBuffer(mutation.expectedBytes)
+        && current.bytes.equals(mutation.expectedBytes);
+  if (!stillOwned) return false;
+  if (mutation.snapshot.exists) {
+    await atomicWrite(mutation.path, mutation.snapshot.bytes, mutation.snapshot.mode, {
+      expectedSnapshot: current,
+    });
+    return true;
+  }
+  await assertSnapshotUnchanged(mutation.path, current, { includeMode: true });
+  await unlink(mutation.path).catch((error) => {
     if (error?.code !== 'ENOENT') throw error;
   });
+  return true;
 }
 
 async function verifyConfig(path, definitions) {
@@ -194,6 +294,9 @@ function resolveOptions(options = {}) {
   }
   if (typeof options.codexPath !== 'string' || options.codexPath.length === 0) {
     throw new Error('codexPath is required');
+  }
+  if (options.onBackup !== undefined && typeof options.onBackup !== 'function') {
+    throw new Error('onBackup must be a function');
   }
   return options;
 }
@@ -250,17 +353,25 @@ function classifyConfigValue(value, definitions) {
 
 async function configStatus(path, definitions) {
   try {
-    const value = JSON.parse(await readFile(path, 'utf8'));
-    return { path, ...classifyConfigValue(value, definitions) };
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
+    const snapshot = await snapshotFile(path);
+    if (!snapshot.exists) {
       return {
         path,
         status: 'missing',
         events: Object.fromEntries(Object.keys(definitions).map((event) => [event, 'missing'])),
       };
     }
-    return { path, status: 'changed', events: {}, error: 'configuration is not valid JSON' };
+    const value = JSON.parse(snapshot.bytes.toString('utf8'));
+    return { path, ...classifyConfigValue(value, definitions) };
+  } catch (error) {
+    return {
+      path,
+      status: 'changed',
+      events: {},
+      error: error?.code === 'HERDR_QUESTION_UNSAFE_PATH'
+        ? 'configuration path is unsafe'
+        : 'configuration is not valid JSON',
+    };
   }
 }
 
@@ -352,9 +463,19 @@ export async function uninstallHooks(rawOptions) {
     for (const artifact of prepared) {
       let backupPath = null;
       if (artifact.nextBytes) {
+        await assertSnapshotUnchanged(artifact.path, artifact.snapshot, { includeMode: true });
         backupPath = await backupOriginal(artifact.path, artifact.snapshot.bytes);
-        mutated.push({ path: artifact.path, snapshot: artifact.snapshot });
-        await atomicWrite(artifact.path, artifact.nextBytes, 0o600);
+        await options.onBackup?.({ name: artifact.name, path: artifact.path, backupPath });
+        const mutation = {
+          path: artifact.path,
+          snapshot: artifact.snapshot,
+          expectedBytes: artifact.nextBytes,
+          expectedAfter: null,
+        };
+        mutated.push(mutation);
+        mutation.expectedAfter = await atomicWrite(artifact.path, artifact.nextBytes, 0o600, {
+          expectedSnapshot: artifact.snapshot,
+        });
         JSON.parse(await readFile(artifact.path, 'utf8'));
       }
       results.push({
@@ -366,9 +487,23 @@ export async function uninstallHooks(rawOptions) {
     }
     let launcherStatus = launcherSnapshot.exists ? 'changed' : 'missing';
     if (exactLauncher) {
-      mutated.push({ path: launcherPath, snapshot: launcherSnapshot });
+      await assertSnapshotUnchanged(launcherPath, launcherSnapshot, { includeMode: true });
+      mutated.push({
+        path: launcherPath,
+        snapshot: launcherSnapshot,
+        expectedExists: false,
+        expectedAfter: null,
+      });
       await unlink(launcherPath);
       launcherStatus = 'removed';
+    }
+    for (const artifact of mutated) {
+      if (artifact.expectedExists === false) {
+        const current = await snapshotFile(artifact.path);
+        if (current.exists) throw conflictError(artifact.path);
+      } else if (artifact.expectedAfter) {
+        await assertSnapshotUnchanged(artifact.path, artifact.expectedAfter, { includeMode: true });
+      }
     }
     return {
       claude: results[0],
@@ -380,7 +515,7 @@ export async function uninstallHooks(rawOptions) {
     const rollbackErrors = [];
     for (const artifact of mutated.reverse()) {
       try {
-        await restoreFile(artifact.path, artifact.snapshot);
+        await restoreMutation(artifact);
       } catch (rollbackError) {
         rollbackErrors.push(rollbackError);
       }
@@ -402,10 +537,10 @@ export async function installHooks(rawOptions) {
   const launcher = Buffer.from(launcherSource());
   const prepared = [];
   for (const artifact of artifacts) {
-    const original = await readConfig(artifact.path);
     const snapshot = await snapshotFile(artifact.path);
-    const next = jsonBytes(mergeConfig(original.value, artifact.definitions));
-    prepared.push({ ...artifact, original, snapshot, next, changed: !original.bytes?.equals(next) });
+    const value = snapshot.exists ? JSON.parse(snapshot.bytes.toString('utf8')) : {};
+    const next = jsonBytes(mergeConfig(value, artifact.definitions));
+    prepared.push({ ...artifact, snapshot, next, changed: !snapshot.bytes?.equals(next) });
   }
   const launcherSnapshot = await snapshotFile(launcherPath);
   const launcherChanged = !launcherSnapshot.bytes?.equals(launcher);
@@ -426,22 +561,54 @@ export async function installHooks(rawOptions) {
       let backupPath = null;
       if (artifact.changed) {
         await ensureParent(artifact.path);
-        if (artifact.original.bytes) backupPath = await backupOriginal(artifact.path, artifact.original.bytes);
-        mutated.push({ path: artifact.path, snapshot: artifact.snapshot });
-        await atomicWrite(artifact.path, artifact.next, 0o600);
+        await assertSnapshotUnchanged(artifact.path, artifact.snapshot, { includeMode: true });
+        if (artifact.snapshot.bytes) {
+          backupPath = await backupOriginal(artifact.path, artifact.snapshot.bytes);
+          await options.onBackup?.({ name: artifact.name, path: artifact.path, backupPath });
+        }
+        const mutation = {
+          path: artifact.path,
+          snapshot: artifact.snapshot,
+          expectedBytes: artifact.next,
+          expectedAfter: null,
+        };
+        mutated.push(mutation);
+        mutation.expectedAfter = await atomicWrite(artifact.path, artifact.next, 0o600, {
+          expectedSnapshot: artifact.snapshot,
+        });
       } else if (artifact.snapshot.mode !== 0o600) {
-        mutated.push({ path: artifact.path, snapshot: artifact.snapshot });
-        await chmod(artifact.path, 0o600);
+        const mutation = {
+          path: artifact.path,
+          snapshot: artifact.snapshot,
+          expectedBytes: artifact.snapshot.bytes,
+          expectedAfter: null,
+        };
+        mutated.push(mutation);
+        mutation.expectedAfter = await safeChmod(artifact.path, 0o600, artifact.snapshot);
       }
       await verifyConfig(artifact.path, artifact.definitions);
       results.push({ name: artifact.name, path: artifact.path, changed: artifact.changed, backupPath });
     }
     if (launcherChanged) {
-      mutated.push({ path: launcherPath, snapshot: launcherSnapshot });
-      await atomicWrite(launcherPath, launcher, 0o700);
-    } else if (((await stat(launcherPath)).mode & 0o777) !== 0o700) {
-      mutated.push({ path: launcherPath, snapshot: launcherSnapshot });
-      await chmod(launcherPath, 0o700);
+      const mutation = {
+        path: launcherPath,
+        snapshot: launcherSnapshot,
+        expectedBytes: launcher,
+        expectedAfter: null,
+      };
+      mutated.push(mutation);
+      mutation.expectedAfter = await atomicWrite(launcherPath, launcher, 0o700, {
+        expectedSnapshot: launcherSnapshot,
+      });
+    } else if (launcherSnapshot.mode !== 0o700) {
+      const mutation = {
+        path: launcherPath,
+        snapshot: launcherSnapshot,
+        expectedBytes: launcherSnapshot.bytes,
+        expectedAfter: null,
+      };
+      mutated.push(mutation);
+      mutation.expectedAfter = await safeChmod(launcherPath, 0o700, launcherSnapshot);
     }
     for (const artifact of prepared) {
       await verifyConfig(artifact.path, artifact.definitions);
@@ -457,16 +624,19 @@ export async function installHooks(rawOptions) {
     const rollbackErrors = [];
     for (const artifact of mutated.reverse()) {
       try {
-        await restoreFile(artifact.path, artifact.snapshot);
+        await restoreMutation(artifact);
       } catch (rollbackError) {
         rollbackErrors.push(rollbackError);
       }
     }
     if (configDirectoryMode !== null) {
       try {
-        await chmod(options.configDir, configDirectoryMode);
+        const current = await lstat(options.configDir);
+        if (current.isDirectory() && (current.mode & 0o777) === 0o700) {
+          await chmod(options.configDir, configDirectoryMode);
+        }
       } catch (rollbackError) {
-        rollbackErrors.push(rollbackError);
+        if (rollbackError?.code !== 'ENOENT') rollbackErrors.push(rollbackError);
       }
     }
     if (rollbackErrors.length > 0) {

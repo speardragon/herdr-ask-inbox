@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -109,7 +109,7 @@ test('failed transaction restores every previously changed file byte-for-byte', 
   await writeFile(options.claudePath, original, { mode: 0o640 });
   options.codexPath = options.claudePath;
 
-  await assert.rejects(() => installHooks(options), /not installed exactly once/);
+  await assert.rejects(() => installHooks(options), /changed during hook transaction/);
 
   assert.deepEqual(await readFile(options.claudePath), original);
   assert.equal((await stat(options.claudePath)).mode & 0o777, 0o640);
@@ -301,4 +301,108 @@ test('invalid JSON is preserved byte-for-byte and prevents partial installation'
   assert.deepEqual(await readFile(options.codexPath), invalid);
   await assert.rejects(() => readFile(options.claudePath), { code: 'ENOENT' });
   await assert.rejects(() => readFile(join(options.configDir, 'hook-launcher.mjs')), { code: 'ENOENT' });
+});
+
+test('install rejects a symlink settings path without replacing the link or target', async (t) => {
+  const options = await setup(t);
+  const target = join(options.root, 'real-claude-settings.json');
+  const targetBytes = Buffer.from('{"target":"must remain exact"}\n');
+  await writeFile(target, targetBytes, { mode: 0o600 });
+  await mkdir(dirname(options.claudePath), { recursive: true, mode: 0o700 });
+  await symlink(target, options.claudePath);
+
+  await assert.rejects(() => installHooks(options), /symbolic link/);
+
+  assert.equal((await lstat(options.claudePath)).isSymbolicLink(), true);
+  assert.deepEqual(await readFile(target), targetBytes);
+  await assert.rejects(() => readFile(options.codexPath), { code: 'ENOENT' });
+});
+
+test('status reports and uninstall rejects a symlink without following it', async (t) => {
+  const options = await setup(t);
+  const target = join(options.root, 'real-codex-hooks.json');
+  const targetBytes = Buffer.from('{"hooks":{"Stop":[]},"trust":"untouched"}\n');
+  await writeFile(target, targetBytes, { mode: 0o600 });
+  await mkdir(dirname(options.codexPath), { recursive: true, mode: 0o700 });
+  await symlink(target, options.codexPath);
+
+  const status = await hookStatus(options);
+  assert.equal(status.codex.status, 'changed');
+  assert.equal(status.codex.error, 'configuration path is unsafe');
+  await assert.rejects(() => uninstallHooks(options), /symbolic link/);
+
+  assert.equal((await lstat(options.codexPath)).isSymbolicLink(), true);
+  assert.deepEqual(await readFile(target), targetBytes);
+});
+
+test('install detects a post-backup settings edit and rolls back only its own writes', async (t) => {
+  const options = await setup(t);
+  const claudeBytes = Buffer.from('{\n  "hooks": {},\n  "claude_original": true\n}\n');
+  const codexBytes = Buffer.from('{\n  "hooks": {},\n  "codex_original": true\n}\n');
+  await mkdir(dirname(options.claudePath), { recursive: true, mode: 0o700 });
+  await mkdir(dirname(options.codexPath), { recursive: true, mode: 0o700 });
+  await writeFile(options.claudePath, claudeBytes, { mode: 0o600 });
+  await writeFile(options.codexPath, codexBytes, { mode: 0o600 });
+  let injected = false;
+
+  await assert.rejects(() => installHooks({
+    ...options,
+    onBackup: async ({ name, path }) => {
+      if (name !== 'codex' || injected) return;
+      injected = true;
+      const external = JSON.parse(await readFile(path, 'utf8'));
+      external.external_new_key = 'must survive';
+      await writeFile(path, `${JSON.stringify(external, null, 2)}\n`, { mode: 0o600 });
+    },
+  }), /changed during hook transaction/);
+
+  assert.equal(injected, true);
+  assert.deepEqual(await readFile(options.claudePath), claudeBytes);
+  assert.equal((await readJson(options.codexPath)).external_new_key, 'must survive');
+  await assert.rejects(() => readFile(join(options.configDir, 'hook-launcher.mjs')), { code: 'ENOENT' });
+});
+
+test('uninstall detects a post-backup edit and keeps installed hooks plus external data', async (t) => {
+  const options = await setup(t);
+  await installHooks(options);
+  const installedClaude = await readFile(options.claudePath);
+  let injected = false;
+
+  await assert.rejects(() => uninstallHooks({
+    ...options,
+    onBackup: async ({ name, path }) => {
+      if (name !== 'codex' || injected) return;
+      injected = true;
+      const external = JSON.parse(await readFile(path, 'utf8'));
+      external.external_new_key = 'must survive uninstall';
+      await writeFile(path, `${JSON.stringify(external, null, 2)}\n`, { mode: 0o600 });
+    },
+  }), /changed during hook transaction/);
+
+  assert.equal(injected, true);
+  assert.deepEqual(await readFile(options.claudePath), installedClaude);
+  assert.equal((await readJson(options.codexPath)).external_new_key, 'must survive uninstall');
+  assert.equal((await hookStatus(options)).launcher.status, 'installed');
+});
+
+test('rollback never overwrites an external edit to an artifact already written by the plugin', async (t) => {
+  const options = await setup(t);
+  await writeJson(options.claudePath, { hooks: {}, original: 'claude' });
+  await writeJson(options.codexPath, { hooks: {}, original: 'codex' });
+
+  await assert.rejects(() => installHooks({
+    ...options,
+    onBackup: async ({ name, path }) => {
+      if (name !== 'codex') return;
+      const codexExternal = JSON.parse(await readFile(path, 'utf8'));
+      codexExternal.external_codex = true;
+      await writeFile(path, `${JSON.stringify(codexExternal, null, 2)}\n`, { mode: 0o600 });
+      const claudeExternal = await readJson(options.claudePath);
+      claudeExternal.external_claude = true;
+      await writeJson(options.claudePath, claudeExternal);
+    },
+  }), /changed during hook transaction/);
+
+  assert.equal((await readJson(options.claudePath)).external_claude, true);
+  assert.equal((await readJson(options.codexPath)).external_codex, true);
 });
