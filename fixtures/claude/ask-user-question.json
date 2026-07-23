@@ -1,0 +1,28 @@
+{
+  "session_id": "claude-session-example",
+  "transcript_path": "/workspace/example/.claude/transcript.jsonl",
+  "cwd": "/workspace/example",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_use_id": "toolu_example_question",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Which framework?",
+        "header": "Framework",
+        "options": [
+          {
+            "label": "React",
+            "description": "Use React for the example UI."
+          },
+          {
+            "label": "Vue",
+            "description": "Use Vue for the example UI."
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  }
+}

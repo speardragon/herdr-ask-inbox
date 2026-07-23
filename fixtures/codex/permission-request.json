@@ -1,0 +1,23 @@
+{
+  "session_id": "codex-session-example",
+  "transcript_path": "/workspace/example/.codex/transcript.jsonl",
+  "cwd": "/workspace/example",
+  "permission_mode": "default",
+  "hook_event_name": "PermissionRequest",
+  "turn_id": "turn-example",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "npm test",
+    "description": "Run the local test suite."
+  },
+  "permission_suggestions": [
+    {
+      "behavior": "allow",
+      "scope": "prefix",
+      "prefix": [
+        "npm",
+        "test"
+      ]
+    }
+  ]
+}

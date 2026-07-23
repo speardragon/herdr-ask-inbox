@@ -1,0 +1,29 @@
+{
+  "session_id": "codex-session-example",
+  "transcript_path": "/workspace/example/.codex/transcript.jsonl",
+  "cwd": "/workspace/example",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "turn_id": "turn-example",
+  "tool_name": "request_user_input",
+  "tool_use_id": "tool_example_question",
+  "tool_input": {
+    "questions": [
+      {
+        "id": "framework",
+        "question": "Which framework?",
+        "header": "Framework",
+        "options": [
+          {
+            "label": "React",
+            "description": "Use React for the example UI."
+          },
+          {
+            "label": "Vue",
+            "description": "Use Vue for the example UI."
+          }
+        ]
+      }
+    ]
+  }
+}
