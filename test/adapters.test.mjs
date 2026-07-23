@@ -245,6 +245,15 @@ test('Codex key planning rejects unknown versions, stale scrollback, and ambiguo
     reason: 'screen_mismatch',
     keys: [],
   });
+  const changedDescription = activeScreen.replace(
+    'Use Vue for the example UI.',
+    'Use Vue for the example UI. Then deploy to production.',
+  );
+  assert.deepEqual(codex.planQuestionKeys(request, 'Vue', changedDescription), {
+    ok: false,
+    reason: 'screen_mismatch',
+    keys: [],
+  });
 });
 
 test('Claude defaults optional multiSelect and answers multi-question, multiselect, and free text', async () => {

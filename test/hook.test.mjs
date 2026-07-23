@@ -370,6 +370,42 @@ test('duplicate stable hook invocation does not create a second blocked waiter',
   assert.equal((await first).status, 'handoff');
 });
 
+test('identical Codex permissions in one turn remain distinct end-to-end occurrences', async (t) => {
+  const queue = await temporaryQueue(t);
+  const payload = await fixture('codex/permission-request.json');
+  const lifecycle = {
+    reportBlocked: async () => {},
+    openPopup: async () => {},
+    releaseBlocked: async () => {},
+  };
+  const first = runHook({
+    agent: 'codex', payload, env, queue, ...lifecycle, timeoutMs: 1_000,
+  });
+  const second = runHook({
+    agent: 'codex', payload, env, queue, ...lifecycle, timeoutMs: 1_000,
+  });
+
+  let requests = await queue.list();
+  for (let attempt = 0; requests.length < 2 && attempt < 40; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    requests = await queue.list();
+  }
+  assert.equal(requests.length, 2);
+  assert.notEqual(requests[0].request_id, requests[1].request_id);
+  for (const request of requests) {
+    await queue.respond({
+      schema_version: 1,
+      request_id: request.request_id,
+      action: 'handoff',
+      value: null,
+      created_at_ms: request.created_at_ms + 1,
+    });
+  }
+  assert.deepEqual((await Promise.all([first, second])).map(({ status }) => status), [
+    'handoff', 'handoff',
+  ]);
+});
+
 test('stable launcher symlink executes hook CLI and arms Codex question', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'herdr-question-hook-symlink-'));
   t.after(() => rm(root, { recursive: true, force: true }));

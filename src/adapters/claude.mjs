@@ -73,9 +73,7 @@ export function normalizeHook(payload, env = process.env) {
   const invocationNonce = randomUUID();
   const upstreamInvocationId = typeof payload.tool_use_id === 'string' && payload.tool_use_id.trim().length > 0
     ? payload.tool_use_id
-    : typeof payload.turn_id === 'string' && payload.turn_id.trim().length > 0
-      ? payload.turn_id
-      : null;
+    : null;
   const questions = isQuestion ? questionsFrom(payload) : null;
   const permission = isPermission ? {
     tool_name: requireNonEmptyString(payload.tool_name, 'tool_name'),

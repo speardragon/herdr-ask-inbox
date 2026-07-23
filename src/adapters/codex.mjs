@@ -79,9 +79,7 @@ export function normalizeHook(payload, env = process.env) {
   const invocationNonce = randomUUID();
   const upstreamInvocationId = typeof payload.tool_use_id === 'string' && payload.tool_use_id.trim().length > 0
     ? payload.tool_use_id
-    : typeof payload.turn_id === 'string' && payload.turn_id.trim().length > 0
-      ? payload.turn_id
-      : null;
+    : null;
   const questions = isQuestion ? questionsFrom(payload) : null;
   const permission = isPermission ? {
     tool_name: requireNonEmptyString(payload.tool_name, 'tool_name'),
@@ -221,11 +219,10 @@ export function planQuestionKeys(requestValue, answer, screen) {
     const line = plainLines[lineIndex];
     if (!line) return mismatch('screen_mismatch');
     const normalizedLine = normalizedText(line);
-    const labelOffset = normalizedLine.indexOf(normalizedText(option.label));
-    const descriptionOffset = normalizedLine.indexOf(normalizedText(option.description));
-    if (labelOffset < 0 || descriptionOffset < labelOffset) return mismatch('screen_mismatch');
-    const prefix = normalizedLine.slice(0, labelOffset);
-    if (/[›>❯●]\s*(?:\d+[.)]\s*)?$/u.test(prefix)) currentIndex = index;
+    const parsedOption = /^(?:(?<cursor>[›>❯●])\s*)?(?:(?<number>\d+)[.)]\s*)?(?<body>.*)$/u.exec(normalizedLine);
+    const expectedBody = normalizedText(`${option.label} ${option.description}`);
+    if (!parsedOption || parsedOption.groups.body !== expectedBody) return mismatch('screen_mismatch');
+    if (parsedOption.groups.cursor) currentIndex = index;
     lineIndex += 1;
   }
   if (currentIndex < 0) return mismatch('screen_mismatch');
