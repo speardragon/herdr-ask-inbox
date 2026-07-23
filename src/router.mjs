@@ -7,9 +7,11 @@ import {
 } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const POPUP_STATE_FILENAME = 'popup-pane.json';
-const MAX_POPUP_STATE_BYTES = 4_096;
+const POPUP_MODAL_FILENAME = 'popup-modal.json';
+const MAX_POPUP_MODAL_BYTES = 4_096;
+const MODAL_LEASE_STALE_MS = 30_000;
 const MAX_NATIVE_UI_WAIT_MS = 2_000;
+const POPUP_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -27,69 +29,95 @@ function liveAgentFor(request, snapshot) {
   ));
 }
 
-async function readPopupPaneId(queue) {
-  if (typeof queue?.root !== 'string' || queue.root.length === 0) {
-    throw new Error('queue root is required for popup state');
+function processIsAbsent(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return error.code === 'ESRCH';
   }
-  const path = join(queue.root, POPUP_STATE_FILENAME);
+}
+
+function validModalLease(value) {
+  return value?.schema_version === 1
+    && POPUP_TOKEN_PATTERN.test(value.token)
+    && ['opening', 'active'].includes(value.state)
+    && Number.isInteger(value.owner_pid)
+    && value.owner_pid > 0
+    && Number.isSafeInteger(value.updated_at_ms)
+    && value.updated_at_ms >= 0;
+}
+
+function modalLeaseIsStale(lease, now = Date.now()) {
+  const age = Math.max(0, now - lease.updated_at_ms);
+  return age > MODAL_LEASE_STALE_MS && processIsAbsent(lease.owner_pid);
+}
+
+async function readPopupModal(queue) {
+  if (typeof queue?.root !== 'string' || queue.root.length === 0) {
+    throw new Error('queue root is required for popup modal lease');
+  }
+  const path = join(queue.root, POPUP_MODAL_FILENAME);
   let handle;
   try {
     handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     if (error.code === 'ELOOP') {
-      throw new Error('popup state must be a regular file, not a symlink');
+      throw new Error('popup modal lease must be a regular file, not a symlink');
     }
     throw error;
   }
   try {
     const metadata = await handle.stat();
-    if (!metadata.isFile()) throw new Error('popup state must be a regular file, not a symlink');
-    if (metadata.size > MAX_POPUP_STATE_BYTES) return null;
+    if (!metadata.isFile()) throw new Error('popup modal lease must be a regular file, not a symlink');
+    if (metadata.size > MAX_POPUP_MODAL_BYTES) throw new Error('popup modal lease is oversized');
     const value = JSON.parse(await handle.readFile('utf8'));
-    return value?.schema_version === 1
-      && typeof value.pane_id === 'string'
-      && value.pane_id.length > 0
-      && !value.pane_id.includes('\0')
-      ? value.pane_id
-      : null;
+    if (!validModalLease(value)) throw new Error('popup modal lease is invalid');
+    return value;
   } catch (error) {
-    if (error instanceof SyntaxError) return null;
+    if (error instanceof SyntaxError) throw new Error('popup modal lease is invalid');
     throw error;
   } finally {
     await handle.close();
   }
 }
 
-async function writePopupPaneId(queue, paneId) {
-  if (typeof paneId !== 'string' || paneId.length === 0 || paneId.includes('\0')) {
-    throw new Error('popup pane ID is invalid');
+async function syncQueueRoot(queue) {
+  let directory;
+  try {
+    directory = await open(queue.root, 'r');
+    await directory.sync();
+  } catch (error) {
+    if (!['EINVAL', 'ENOTSUP', 'EISDIR', 'EPERM', 'EBADF'].includes(error.code)) throw error;
+  } finally {
+    await directory?.close().catch(() => {});
   }
-  const path = join(queue.root, POPUP_STATE_FILENAME);
+}
+
+async function writePopupModal(queue, lease) {
+  if (!validModalLease(lease)) throw new Error('popup modal lease is invalid');
+  const path = join(queue.root, POPUP_MODAL_FILENAME);
   try {
     const existingHandle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     try {
       if (!(await existingHandle.stat()).isFile()) {
-        throw new Error('popup state must be a regular file, not a symlink');
+        throw new Error('popup modal lease must be a regular file, not a symlink');
       }
     } finally {
       await existingHandle.close();
     }
   } catch (error) {
     if (error.code === 'ELOOP') {
-      throw new Error('popup state must be a regular file, not a symlink');
+      throw new Error('popup modal lease must be a regular file, not a symlink');
     }
     if (error.code !== 'ENOENT') throw error;
   }
 
-  const temporary = join(queue.root, `.${POPUP_STATE_FILENAME}.${process.pid}.${randomUUID()}.tmp`);
+  const temporary = join(queue.root, `.${POPUP_MODAL_FILENAME}.${process.pid}.${randomUUID()}.tmp`);
   const handle = await open(temporary, 'wx', 0o600);
   try {
-    await handle.writeFile(`${JSON.stringify({
-      schema_version: 1,
-      pane_id: paneId,
-      updated_at_ms: Date.now(),
-    })}\n`, 'utf8');
+    await handle.writeFile(`${JSON.stringify(lease)}\n`, 'utf8');
     await handle.sync();
   } catch (error) {
     await unlink(temporary).catch(() => {});
@@ -99,19 +127,47 @@ async function writePopupPaneId(queue, paneId) {
   }
   try {
     await rename(temporary, path);
-    let directory;
-    try {
-      directory = await open(queue.root, 'r');
-      await directory.sync();
-    } catch (error) {
-      if (!['EINVAL', 'ENOTSUP', 'EISDIR', 'EPERM', 'EBADF'].includes(error.code)) throw error;
-    } finally {
-      await directory?.close().catch(() => {});
-    }
+    await syncQueueRoot(queue);
   } catch (error) {
     await unlink(temporary).catch(() => {});
     throw error;
   }
+}
+
+async function clearPopupModalUnlocked(queue, token) {
+  const lease = await readPopupModal(queue);
+  if (!lease || lease.token !== token) return false;
+  await unlink(join(queue.root, POPUP_MODAL_FILENAME));
+  await syncQueueRoot(queue);
+  return true;
+}
+
+async function livePopupModal(queue) {
+  const lease = await readPopupModal(queue);
+  if (!lease) return null;
+  if (!modalLeaseIsStale(lease)) return lease;
+  await clearPopupModalUnlocked(queue, lease.token);
+  return null;
+}
+
+export async function claimPopupModal(queue, token) {
+  if (!POPUP_TOKEN_PATTERN.test(token)) return false;
+  return queue.withPopupLock(async () => {
+    const lease = await livePopupModal(queue);
+    if (!lease || lease.token !== token) return false;
+    await writePopupModal(queue, {
+      ...lease,
+      state: 'active',
+      owner_pid: process.pid,
+      updated_at_ms: Date.now(),
+    });
+    return true;
+  });
+}
+
+export async function clearPopupModal(queue, token) {
+  if (!POPUP_TOKEN_PATTERN.test(token)) return false;
+  return queue.withPopupLock(() => clearPopupModalUnlocked(queue, token));
 }
 
 async function cancelStaleRequest(request, queue) {
@@ -130,14 +186,40 @@ function newestForPane(requests, paneId) {
     ))[0];
 }
 
+async function withinDeadline(factory, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    const error = new Error('native UI readiness deadline exceeded');
+    error.code = 'NATIVE_UI_DEADLINE';
+    throw error;
+  }
+  let timer;
+  return Promise.race([
+    Promise.resolve().then(() => factory(remaining)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error('native UI readiness deadline exceeded');
+        error.code = 'NATIVE_UI_DEADLINE';
+        reject(error);
+      }, remaining);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function defaultWaitForNativeUi(request, timeoutMs, { herdr }) {
   const deadline = Date.now() + timeoutMs;
   let previousReadyScreen = null;
   while (true) {
     try {
-      const snapshot = await herdr.snapshot();
+      const snapshot = await withinDeadline(
+        (remaining) => herdr.snapshot({ timeoutMs: remaining }),
+        deadline,
+      );
       const live = liveAgentFor(request, snapshot);
-      const screen = await herdr.readPane(request.source.pane_id);
+      const screen = await withinDeadline(
+        (remaining) => herdr.readPane(request.source.pane_id, { timeoutMs: remaining }),
+        deadline,
+      );
       if (
         live?.agent_status === 'blocked'
         && typeof screen === 'string'
@@ -148,9 +230,10 @@ async function defaultWaitForNativeUi(request, timeoutMs, { herdr }) {
       } else {
         previousReadyScreen = null;
       }
-    } catch {
+    } catch (error) {
       // Readiness is advisory. Continue until the bounded deadline and always
       // attempt source focus afterward.
+      if (error?.code === 'NATIVE_UI_DEADLINE') return false;
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
@@ -256,8 +339,9 @@ export async function handleAgentStatusChanged(context, {
   const request = newestForPane(liveRequests, context.pane_id);
   if (!request) return { status: 'no-live-request' };
 
+  let modalPlan;
   try {
-    return await queue.withPopupLock(async () => {
+    modalPlan = await queue.withPopupLock(async () => {
       // Event processes can race after taking their initial reconciliation
       // snapshot. Refresh only after acquiring the cross-process lock so the
       // second process observes the pane opened by the first.
@@ -266,27 +350,30 @@ export async function handleAgentStatusChanged(context, {
         await cancelStaleRequest(request, queue);
         return { status: 'no-live-request' };
       }
-      const recordedPaneId = await readPopupPaneId(queue);
-      const recordedPaneIsLive = recordedPaneId
-        && routingSnapshot.panes.some((pane) => pane?.pane_id === recordedPaneId);
-      if (recordedPaneIsLive) {
-        // A transient focus error is not positive evidence that the popup pane
-        // disappeared. Propagate to native handoff rather than opening another.
-        await herdr.focusPopup(recordedPaneId);
+      const lease = await livePopupModal(queue);
+      if (lease) {
         return {
-          status: 'focused',
+          status: 'active',
           request_id: request.request_id,
-          pane_id: recordedPaneId,
+          modal: true,
         };
       }
 
-      const paneId = await herdr.openPopup();
-      await writePopupPaneId(queue, paneId);
-      return {
-        status: 'opened',
-        request_id: request.request_id,
-        pane_id: paneId,
+      const token = randomUUID();
+      const openingLease = {
+        schema_version: 1,
+        token,
+        state: 'opening',
+        owner_pid: process.pid,
+        updated_at_ms: Date.now(),
       };
+      try {
+        await writePopupModal(queue, openingLease);
+      } catch (error) {
+        await clearPopupModalUnlocked(queue, token).catch(() => {});
+        throw error;
+      }
+      return { status: 'opening', token };
     });
   } catch {
     return routeFailureToNative(request, {
@@ -296,6 +383,39 @@ export async function handleAgentStatusChanged(context, {
       nativeUiTimeoutMs,
     });
   }
+
+  if (modalPlan.status !== 'opening') return modalPlan;
+
+  // The popup command is session-modal and remains pending until the popup
+  // exits. Never hold the queue lock while waiting: the popup process must
+  // claim and later clear this exact token through the same lock.
+  let openFailed = false;
+  try {
+    await herdr.openPopup(modalPlan.token);
+  } catch {
+    openFailed = true;
+  }
+
+  let clearFailed = false;
+  try {
+    await clearPopupModal(queue, modalPlan.token);
+  } catch {
+    clearFailed = true;
+  }
+
+  if (openFailed || clearFailed) {
+    return routeFailureToNative(request, {
+      queue,
+      herdr,
+      waitForNativeUi,
+      nativeUiTimeoutMs,
+    });
+  }
+  return {
+    status: 'opened',
+    request_id: request.request_id,
+    modal: true,
+  };
 }
 
 export async function handoff(request, {

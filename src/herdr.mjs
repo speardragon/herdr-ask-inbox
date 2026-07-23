@@ -6,6 +6,7 @@ const PLUGIN_ID = 'ray.herdr-question';
 const TIMEOUT_MS = 5_000;
 const MAX_BUFFER_BYTES = 1_048_576;
 const MAX_KEYS = 32;
+const POPUP_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NAMED_KEYS = new Set([
   'up',
   'down',
@@ -19,11 +20,12 @@ const NAMED_KEYS = new Set([
 ]);
 
 export class HerdrOperationError extends Error {
-  constructor(operation, exitCode = null) {
+  constructor(operation, exitCode = null, errorCode = null) {
     super(`herdr ${operation} failed`);
     this.name = 'HerdrOperationError';
     this.operation = operation;
     this.exitCode = Number.isSafeInteger(exitCode) ? exitCode : null;
+    this.errorCode = typeof errorCode === 'string' ? errorCode : null;
   }
 
   toJSON() {
@@ -32,6 +34,7 @@ export class HerdrOperationError extends Error {
       message: this.message,
       operation: this.operation,
       exitCode: this.exitCode,
+      errorCode: this.errorCode,
     };
   }
 }
@@ -72,20 +75,31 @@ function snapshotFrom(value) {
   return snapshot;
 }
 
-function popupPaneIdFrom(value) {
+function popupModalResultFrom(value) {
   const result = value?.result;
-  const paneId = result?.plugin_pane?.pane?.pane_id;
-  if (
-    result?.type !== 'plugin_pane_opened'
-    || result?.plugin_pane?.plugin_id !== PLUGIN_ID
-    || result?.plugin_pane?.entrypoint !== 'question'
-    || typeof paneId !== 'string'
-    || paneId.length === 0
-    || paneId.includes('\0')
-  ) {
+  if (result?.type !== 'ok') {
     throw new HerdrOperationError('openPopup');
   }
-  return paneId;
+  return { ok: true, modal: true };
+}
+
+function safeCliErrorCode(error) {
+  if (typeof error?.stdout !== 'string' || error.stdout.length > 16_384) return null;
+  try {
+    const value = JSON.parse(error.stdout);
+    const code = value?.error?.code;
+    return code === 'ui_busy' ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+function boundedTimeout(timeoutMs) {
+  if (timeoutMs === undefined) return TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError('timeoutMs must be a positive finite number');
+  }
+  return Math.max(1, Math.min(TIMEOUT_MS, Math.ceil(timeoutMs)));
 }
 
 export function createHerdr({
@@ -96,23 +110,24 @@ export function createHerdr({
   requireString(bin, 'herdr binary');
   if (typeof execFile !== 'function') throw new TypeError('execFile must be a function');
 
-  const run = async (operation, args) => {
+  const run = async (operation, args, { timeoutMs, noTimeout = false } = {}) => {
     try {
       return await execFile(bin, args, {
         env,
         encoding: 'utf8',
-        timeout: TIMEOUT_MS,
+        timeout: noTimeout ? 0 : boundedTimeout(timeoutMs),
         maxBuffer: MAX_BUFFER_BYTES,
         shell: false,
       });
     } catch (error) {
-      throw new HerdrOperationError(operation, error?.code);
+      if (error instanceof TypeError) throw error;
+      throw new HerdrOperationError(operation, error?.code, safeCliErrorCode(error));
     }
   };
 
   return {
-    async snapshot() {
-      const { stdout } = await run('snapshot', ['api', 'snapshot']);
+    async snapshot(options) {
+      const { stdout } = await run('snapshot', ['api', 'snapshot'], options);
       try {
         return snapshotFrom(parseJsonObject(stdout, 'snapshot'));
       } catch (error) {
@@ -121,13 +136,13 @@ export function createHerdr({
       }
     },
 
-    async readPane(paneId) {
+    async readPane(paneId, options) {
       requireString(paneId, 'pane ID');
       const { stdout } = await run('readPane', [
         'pane', 'read', paneId,
         '--source', 'detection',
         '--format', 'text',
-      ]);
+      ], options);
       if (typeof stdout !== 'string') throw new HerdrOperationError('readPane');
       return stdout;
     },
@@ -150,20 +165,19 @@ export function createHerdr({
       await run('focusAgent', ['agent', 'focus', paneId]);
     },
 
-    async openPopup() {
+    async openPopup(token) {
+      if (typeof token !== 'string' || !POPUP_TOKEN_PATTERN.test(token)) {
+        throw new TypeError('popup token must be a UUID v4');
+      }
       const { stdout } = await run('openPopup', [
         'plugin', 'pane', 'open',
         '--plugin', PLUGIN_ID,
         '--entrypoint', 'question',
         '--placement', 'popup',
         '--focus',
-      ]);
-      return popupPaneIdFrom(parseJsonObject(stdout, 'openPopup'));
-    },
-
-    async focusPopup(paneId) {
-      requireString(paneId, 'popup pane ID');
-      await run('focusPopup', ['plugin', 'pane', 'focus', paneId]);
+        '--env', `HERDR_QUESTION_POPUP_TOKEN=${token}`,
+      ], { noTimeout: true });
+      return popupModalResultFrom(parseJsonObject(stdout, 'openPopup'));
     },
 
     async notify(title, body) {

@@ -8,6 +8,12 @@ platforms = ["macos", "linux"]
 [[build]]
 command = ["node", "-e", "const major = Number(process.versions.node.split('.')[0]); if (major < 22) { console.error('Node.js >= 22 required'); process.exit(1); }"]
 
+[[build]]
+command = ["npm", "test"]
+
+[[build]]
+command = ["node", "bin/install-hooks.mjs"]
+
 [[panes]]
 id = "question"
 title = "Herdr Question"
@@ -24,7 +30,7 @@ command = ["node", "bin/event.mjs"]
 id = "open"
 title = "Herdr Question: Open pending queue"
 contexts = ["global", "workspace", "pane"]
-command = ["bash", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin ray.herdr-question --entrypoint question --placement popup --focus"]
+command = ["node", "bin/open.mjs"]
 
 [[actions]]
 id = "install-hooks"

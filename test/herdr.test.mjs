@@ -5,6 +5,7 @@ import { createHerdr, HerdrOperationError } from '../src/herdr.mjs';
 import { captureExecFile } from './helpers/fake-herdr.mjs';
 
 test('herdr operations pass untrusted values as individual argv items', async () => {
+  const popupToken = '11111111-1111-4111-8111-111111111111';
   const snapshot = {
     focused_workspace_id: 'w1',
     panes: [{ pane_id: 'w1:p1' }],
@@ -15,20 +16,7 @@ test('herdr operations pass untrusted values as individual argv items', async ()
     { stdout: 'Choose carefully\n', stderr: '' },
     { stdout: '', stderr: '' },
     { stdout: '', stderr: '' },
-    {
-      stdout: JSON.stringify({
-        result: {
-          type: 'plugin_pane_opened',
-          plugin_pane: {
-            plugin_id: 'ray.herdr-question',
-            entrypoint: 'question',
-            pane: { pane_id: 'w1:p-popup' },
-          },
-        },
-      }),
-      stderr: '',
-    },
-    { stdout: '', stderr: '' },
+    { stdout: JSON.stringify({ id: 'cli:plugin', result: { type: 'ok' } }), stderr: '' },
     { stdout: '', stderr: '' },
     { stdout: '', stderr: '' },
     { stdout: '', stderr: '' },
@@ -43,8 +31,7 @@ test('herdr operations pass untrusted values as individual argv items', async ()
   assert.equal(await api.readPane('w1:p1; touch /tmp/nope'), 'Choose carefully\n');
   await api.sendAgentKeys('w1:p1; touch /tmp/nope', ['down', 'enter']);
   await api.focusAgent('w1:p1; touch /tmp/nope');
-  assert.equal(await api.openPopup(), 'w1:p-popup');
-  await api.focusPopup('w1:p-popup; touch /tmp/nope');
+  assert.deepEqual(await api.openPopup(popupToken), { ok: true, modal: true });
   await api.notify('Needs "attention"', 'body; touch /tmp/nope');
   await api.reportBlocked({
     source: { pane_id: 'w1:p1', agent: 'claude', session_id: 'session one' },
@@ -64,8 +51,8 @@ test('herdr operations pass untrusted values as individual argv items', async ()
       '--entrypoint', 'question',
       '--placement', 'popup',
       '--focus',
+      '--env', `HERDR_QUESTION_POPUP_TOKEN=${popupToken}`,
     ],
-    ['plugin', 'pane', 'focus', 'w1:p-popup; touch /tmp/nope'],
     ['notification', 'show', 'Needs "attention"', '--body', 'body; touch /tmp/nope', '--sound', 'request'],
     [
       'pane', 'report-agent', 'w1:p1',
@@ -80,12 +67,25 @@ test('herdr operations pass untrusted values as individual argv items', async ()
       '--agent', 'claude',
     ],
   ]);
-  for (const call of calls) {
+  for (const [index, call] of calls.entries()) {
     assert.equal(call.bin, '/fake/herdr');
-    assert.equal(call.options.timeout, 5_000);
+    assert.equal(call.options.timeout, index === 4 ? 0 : 5_000);
     assert.equal(call.options.maxBuffer, 1_048_576);
     assert.equal(call.options.shell, false);
   }
+});
+
+test('blocking popup modal has no short subprocess timeout', async () => {
+  const { calls, execFile } = captureExecFile([
+    { stdout: JSON.stringify({ id: 'cli:plugin', result: { type: 'ok' } }), stderr: '' },
+  ]);
+  const api = createHerdr({ execFile });
+
+  await api.openPopup('11111111-1111-4111-8111-111111111111');
+
+  assert.equal(calls[0].options.timeout, 0);
+  assert.equal(calls[0].options.maxBuffer, 1_048_576);
+  assert.equal(calls[0].options.shell, false);
 });
 
 test('named key transport rejects empty, unknown, and excessive key sequences', async () => {
@@ -110,9 +110,46 @@ test('snapshot and popup responses require documented structured JSON shapes', a
       && error.operation === 'snapshot'
       && !error.message.includes('SECRET')
   ));
-  await assert.rejects(api.openPopup('w1'), (error) => (
+  await assert.rejects(api.openPopup('11111111-1111-4111-8111-111111111111'), (error) => (
     error instanceof HerdrOperationError && error.operation === 'openPopup'
   ));
+});
+
+test('popup modal classifies exact ui_busy error without treating it as owned', async () => {
+  const failure = Object.assign(new Error('command failed'), {
+    code: 1,
+    stdout: JSON.stringify({
+      id: 'cli:plugin',
+      error: {
+        code: 'ui_busy',
+        message: 'popup panes can only open from the normal workspace view',
+      },
+    }),
+    stderr: '',
+  });
+  const { execFile } = captureExecFile([failure]);
+  const api = createHerdr({ execFile });
+
+  await assert.rejects(api.openPopup('11111111-1111-4111-8111-111111111111'), (error) => (
+    error instanceof HerdrOperationError
+    && error.operation === 'openPopup'
+    && error.errorCode === 'ui_busy'
+    && !error.message.includes('normal workspace')
+  ));
+});
+
+test('snapshot and pane reads accept a remaining-budget timeout override', async () => {
+  const snapshot = { focused_workspace_id: 'w1', panes: [], agents: [] };
+  const { calls, execFile } = captureExecFile([
+    { stdout: JSON.stringify({ result: { type: 'session_snapshot', snapshot } }), stderr: '' },
+    { stdout: 'screen', stderr: '' },
+  ]);
+  const api = createHerdr({ execFile });
+
+  await api.snapshot({ timeoutMs: 17 });
+  await api.readPane('w1:p1', { timeoutMs: 9 });
+
+  assert.deepEqual(calls.map(({ options }) => options.timeout), [17, 9]);
 });
 
 test('subprocess failures become typed errors without environment or stderr disclosure', async () => {
