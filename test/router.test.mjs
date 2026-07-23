@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -104,7 +106,7 @@ test('blocked event opens one popup for a matching pane and exact agent session'
     ),
     { status: 'focused', request_id: 'request-a', pane_id: 'w-current:p-popup' },
   );
-  assert.deepEqual(calls.filter(({ name }) => name === 'openPopup').map(({ args }) => args), [['w-current']]);
+  assert.deepEqual(calls.filter(({ name }) => name === 'openPopup').map(({ args }) => args), [[]]);
   assert.deepEqual(calls.filter(({ name }) => name === 'focusPopup').map(({ args }) => args), [['w-current:p-popup']]);
 });
 
@@ -155,6 +157,28 @@ test('reconciliation cancels disappeared or session-mismatched requests and choo
   assert.deepEqual((await queue.list()).map(({ request_id }) => request_id), ['matching-old', 'matching-new']);
 });
 
+test('terminal stale cancellation is consumed immediately instead of leaving an orphan response', async (t) => {
+  const queue = await temporaryQueue(t);
+  const stale = requestFor({
+    id: 'terminal-stale',
+    transport: 'terminal-keys',
+    agent: 'codex',
+    sessionId: 'old-session',
+  });
+  await queue.enqueue(stale);
+  const { api } = fakeHerdr({
+    snapshot: liveSnapshot({ agent: 'codex', sessionId: 'new-session' }),
+  });
+
+  await handleAgentStatusChanged(
+    { agent_status: 'blocked', pane_id: stale.source.pane_id },
+    { queue, herdr: api },
+  );
+
+  assert.equal(await queue.takeResponse(stale.request_id), null);
+  assert.deepEqual(await queue.list(), []);
+});
+
 test('blocked event with no exact live request neither opens nor focuses a popup', async (t) => {
   const queue = await temporaryQueue(t);
   await queue.enqueue(requestFor({ sessionId: 'stale' }));
@@ -170,23 +194,109 @@ test('blocked event with no exact live request neither opens nor focuses a popup
   assert.equal(calls.some(({ name }) => ['openPopup', 'focusPopup'].includes(name)), false);
 });
 
-test('unsafe popup state symlink fails closed without opening a pane', async (t) => {
+test('unsafe popup state fails closed to native handoff without leaving the hook waiting', async (t) => {
   const queue = await temporaryQueue(t);
   await queue.enqueue(requestFor());
   await symlink('/tmp/not-owned', join(queue.root, 'popup-pane.json'));
-  const { api, calls } = fakeHerdr({ snapshot: liveSnapshot() });
+  const calls = [];
+  const herdr = {
+    snapshot: async () => liveSnapshot(),
+    openPopup: async () => { calls.push('open'); },
+    releaseBlocked: async () => { calls.push('release'); },
+    focusAgent: async () => { calls.push('focus'); },
+    notify: async () => { calls.push('notify'); },
+  };
 
-  await assert.rejects(
-    handleAgentStatusChanged(
-      { agent_status: 'blocked', pane_id: 'w-source:p1' },
-      { queue, herdr: api },
-    ),
-    /popup state/i,
+  const result = await handleAgentStatusChanged(
+    { agent_status: 'blocked', pane_id: 'w-source:p1' },
+    { queue, herdr, waitForNativeUi: async () => {} },
   );
-  assert.equal(calls.some(({ name }) => name === 'openPopup'), false);
+
+  assert.equal(result.status, 'native-handoff');
+  assert.equal((await queue.takeResponse('request-a')).action, 'handoff');
+  assert.deepEqual(calls, ['focus', 'notify']);
 });
 
-test('hook-response handoff publishes first, waits bounded, releases owned authority, then focuses', async (t) => {
+test('a transient focus failure on a positively live recorded popup never opens a duplicate', async (t) => {
+  const queue = await temporaryQueue(t);
+  await queue.enqueue(requestFor());
+  let popupPaneId;
+  let openCalls = 0;
+  let focusAttempts = 0;
+  const events = [];
+  const herdr = {
+    snapshot: async () => liveSnapshot({ popupPaneId }),
+    openPopup: async () => {
+      openCalls += 1;
+      popupPaneId = 'w-current:p-popup';
+      return popupPaneId;
+    },
+    focusPopup: async () => {
+      focusAttempts += 1;
+      throw new Error('transient focus error');
+    },
+    focusAgent: async () => { events.push('source-focus'); },
+    notify: async () => { events.push('notify'); },
+  };
+  const context = { agent_status: 'blocked', pane_id: 'w-source:p1' };
+  await handleAgentStatusChanged(context, { queue, herdr });
+
+  const result = await handleAgentStatusChanged(context, {
+    queue,
+    herdr,
+    waitForNativeUi: async () => true,
+  });
+
+  assert.equal(result.status, 'native-handoff');
+  assert.equal(openCalls, 1);
+  assert.equal(focusAttempts, 1);
+  assert.deepEqual(events, ['source-focus', 'notify']);
+  assert.equal((await queue.takeResponse('request-a')).action, 'handoff');
+});
+
+test('snapshot, lock, popup open, and popup state write failures hand a matching hook back natively', async (t) => {
+  for (const failure of ['snapshot', 'lock', 'open', 'state-write']) {
+    await t.test(failure, async (t2) => {
+      const queue = await temporaryQueue(t2);
+      const request = requestFor({ id: `failure-${failure}` });
+      await queue.enqueue(request);
+      const realLock = queue.withPopupLock.bind(queue);
+      if (failure === 'lock') {
+        queue.withPopupLock = async () => { throw new Error('lock failed'); };
+      }
+      let snapshotCalls = 0;
+      const events = [];
+      const herdr = {
+        snapshot: async () => {
+          snapshotCalls += 1;
+          if (failure === 'snapshot' && snapshotCalls === 1) throw new Error('snapshot failed');
+          return liveSnapshot();
+        },
+        openPopup: async () => {
+          if (failure === 'open') throw new Error('open failed');
+          if (failure === 'state-write') {
+            await symlink('/tmp/not-owned', join(queue.root, 'popup-pane.json'));
+          }
+          return 'w-current:p-popup';
+        },
+        focusAgent: async () => { events.push('focus'); },
+        notify: async () => { events.push('notify'); },
+      };
+
+      const result = await handleAgentStatusChanged(
+        { agent_status: 'blocked', pane_id: request.source.pane_id },
+        { queue, herdr, waitForNativeUi: async () => true },
+      );
+
+      assert.equal(result.status, 'native-handoff');
+      assert.equal((await queue.takeResponse(request.request_id)).action, 'handoff');
+      assert.deepEqual(events, ['focus', 'notify']);
+      queue.withPopupLock = realLock;
+    });
+  }
+});
+
+test('hook-response handoff publishes first, never double-releases hook authority, and focuses despite wait failure', async (t) => {
   const queue = await temporaryQueue(t);
   const request = requestFor();
   await queue.enqueue(request);
@@ -204,29 +314,65 @@ test('hook-response handoff publishes first, waits bounded, releases owned autho
       assert.ok(timeoutMs <= 2_000);
       assert.equal((await queue.takeResponse(request.request_id)).action, 'handoff');
       events.push('wait');
+      throw new Error('transient readiness failure');
     },
   });
 
-  assert.deepEqual(result, { status: 'handed-off' });
-  assert.deepEqual(events, ['wait', 'release', 'focus']);
+  assert.deepEqual(result, { status: 'handed-off', focused: true, native_ui_ready: false });
+  assert.deepEqual(events, ['wait', 'focus']);
 });
 
-test('terminal handoff sends zero keys and releases before focusing exact source pane', async () => {
+test('default hook handoff polls fresh blocked screen readiness only after response publication', async (t) => {
+  const queue = await temporaryQueue(t);
+  const request = requestFor();
+  await queue.enqueue(request);
+  let responseObserved = false;
+  let snapshotCalls = 0;
+  const events = [];
+  const herdr = {
+    snapshot: async () => {
+      snapshotCalls += 1;
+      if (!responseObserved) {
+        responseObserved = (await queue.takeResponse(request.request_id))?.action === 'handoff';
+      }
+      return liveSnapshot();
+    },
+    readPane: async () => 'Native question is ready',
+    releaseBlocked: async () => { events.push('release'); },
+    focusAgent: async () => { events.push('focus'); },
+  };
+
+  const result = await handoff(request, {
+    queue,
+    herdr,
+    nativeUiTimeoutMs: 200,
+  });
+
+  assert.equal(responseObserved, true);
+  assert.ok(snapshotCalls >= 2);
+  assert.deepEqual(events, ['focus']);
+  assert.deepEqual(result, { status: 'handed-off', focused: true, native_ui_ready: true });
+});
+
+test('terminal handoff consumes cancellation, sends zero keys, and focuses even when release fails', async (t) => {
+  const queue = await temporaryQueue(t);
   const request = requestFor({ transport: 'terminal-keys', agent: 'codex' });
+  await queue.enqueue(request);
   const events = [];
   const herdr = {
     sendAgentKeys: async () => { events.push('keys'); },
-    releaseBlocked: async (value) => { events.push(`release:${value.source.pane_id}`); },
+    releaseBlocked: async (value) => {
+      events.push(`release:${value.source.pane_id}`);
+      throw new Error('newer lifecycle already owns pane');
+    },
     focusAgent: async (paneId) => { events.push(`focus:${paneId}`); },
   };
 
-  await handoff(request, {
-    queue: { respond: async () => { events.push('respond'); } },
-    herdr,
-    waitForNativeUi: async () => { events.push('wait'); },
-  });
+  const result = await handoff(request, { queue, herdr });
 
   assert.deepEqual(events, ['release:w-source:p1', 'focus:w-source:p1']);
+  assert.equal(await queue.takeResponse(request.request_id), null);
+  assert.deepEqual(result, { status: 'handed-off', focused: true, native_ui_ready: true });
 });
 
 test('event context parser accepts only bounded plain event identity', () => {
@@ -249,9 +395,67 @@ test('event context parser accepts only bounded plain event identity', () => {
 
 test('runEvent fails open on malformed plugin context', async () => {
   const result = await runEvent({
-    env: { HERDR_PLUGIN_CONTEXT_JSON: 'not-json' },
+    env: { HERDR_PLUGIN_EVENT_JSON: 'not-json' },
     queue: { list: async () => { throw new Error('must not run'); } },
     herdr: {},
   });
   assert.deepEqual(result, { status: 'invalid-context' });
+});
+
+test('event CLI consumes HERDR_PLUGIN_EVENT_JSON and opens popup with the actual 0.7.5 argv contract', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-event-cli-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const queue = await openQueue(root);
+  await queue.enqueue(requestFor());
+  const logPath = join(root, 'herdr-calls.jsonl');
+  const fakeBin = join(root, 'fake-herdr.mjs');
+  const snapshot = liveSnapshot();
+  await writeFile(fakeBin, `#!/usr/bin/env node
+import { appendFile } from 'node:fs/promises';
+const args = process.argv.slice(2);
+await appendFile(process.env.FAKE_LOG, JSON.stringify(args) + '\\n');
+if (args[0] === 'plugin' && args[1] === 'config-dir') {
+  process.stdout.write(process.env.FAKE_QUEUE_ROOT + '\\n');
+} else if (args[0] === 'api' && args[1] === 'snapshot') {
+  process.stdout.write(JSON.stringify({ result: { type: 'session_snapshot', snapshot: JSON.parse(process.env.FAKE_SNAPSHOT) } }));
+} else if (args[0] === 'plugin' && args[1] === 'pane' && args[2] === 'open') {
+  process.stdout.write(JSON.stringify({ result: { type: 'plugin_pane_opened', plugin_pane: {
+    plugin_id: 'ray.herdr-question', entrypoint: 'question', pane: { pane_id: 'w-current:p-popup' }
+  } } }));
+} else {
+  process.exitCode = 2;
+}
+`, { mode: 0o700 });
+  await chmod(fakeBin, 0o700);
+  const child = spawn(process.execPath, [new URL('../bin/event.mjs', import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      HERDR_BIN_PATH: fakeBin,
+      HERDR_PLUGIN_EVENT_JSON: JSON.stringify({
+        type: 'pane.agent_status_changed',
+        pane_id: 'w-source:p1',
+        agent_status: 'blocked',
+      }),
+      HERDR_PLUGIN_CONTEXT_JSON: JSON.stringify({
+        pane_id: 'w-source:p1',
+        agent_status: 'working',
+      }),
+      FAKE_LOG: logPath,
+      FAKE_QUEUE_ROOT: root,
+      FAKE_SNAPSHOT: JSON.stringify(snapshot),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const [exitCode] = await once(child, 'exit');
+  assert.equal(exitCode, 0);
+  const calls = (await readFile(logPath, 'utf8')).trim().split('\n').map(JSON.parse);
+  const openCall = calls.find((args) => args.slice(0, 3).join(' ') === 'plugin pane open');
+  assert.deepEqual(openCall, [
+    'plugin', 'pane', 'open',
+    '--plugin', 'ray.herdr-question',
+    '--entrypoint', 'question',
+    '--placement', 'popup',
+    '--focus',
+  ]);
+  assert.equal(openCall.includes('--workspace'), false);
 });

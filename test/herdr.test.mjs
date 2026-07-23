@@ -43,7 +43,7 @@ test('herdr operations pass untrusted values as individual argv items', async ()
   assert.equal(await api.readPane('w1:p1; touch /tmp/nope'), 'Choose carefully\n');
   await api.sendAgentKeys('w1:p1; touch /tmp/nope', ['down', 'enter']);
   await api.focusAgent('w1:p1; touch /tmp/nope');
-  assert.equal(await api.openPopup('w-current; touch /tmp/nope'), 'w1:p-popup');
+  assert.equal(await api.openPopup(), 'w1:p-popup');
   await api.focusPopup('w1:p-popup; touch /tmp/nope');
   await api.notify('Needs "attention"', 'body; touch /tmp/nope');
   await api.reportBlocked({
@@ -62,8 +62,7 @@ test('herdr operations pass untrusted values as individual argv items', async ()
       'plugin', 'pane', 'open',
       '--plugin', 'ray.herdr-question',
       '--entrypoint', 'question',
-      '--placement', 'overlay',
-      '--workspace', 'w-current; touch /tmp/nope',
+      '--placement', 'popup',
       '--focus',
     ],
     ['plugin', 'pane', 'focus', 'w1:p-popup; touch /tmp/nope'],

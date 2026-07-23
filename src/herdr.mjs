@@ -150,14 +150,12 @@ export function createHerdr({
       await run('focusAgent', ['agent', 'focus', paneId]);
     },
 
-    async openPopup(workspaceId) {
-      requireString(workspaceId, 'workspace ID');
+    async openPopup() {
       const { stdout } = await run('openPopup', [
         'plugin', 'pane', 'open',
         '--plugin', PLUGIN_ID,
         '--entrypoint', 'question',
-        '--placement', 'overlay',
-        '--workspace', workspaceId,
+        '--placement', 'popup',
         '--focus',
       ]);
       return popupPaneIdFrom(parseJsonObject(stdout, 'openPopup'));

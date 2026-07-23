@@ -29,6 +29,12 @@ export function parseEventContext(raw) {
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) return null;
   if (
+    value.type !== undefined
+    && !['pane.agent_status_changed', 'pane_agent_status_changed'].includes(value.type)
+  ) {
+    return null;
+  }
+  if (
     typeof value.agent_status !== 'string'
     || value.agent_status.length === 0
     || value.agent_status.length > 64
@@ -75,7 +81,10 @@ export async function runEvent({
   herdr,
   execFile = execFileAsync,
 } = {}) {
-  const context = parseEventContext(env.HERDR_PLUGIN_CONTEXT_JSON);
+  const rawEvent = env.HERDR_PLUGIN_EVENT_JSON;
+  const context = parseEventContext(
+    rawEvent === undefined ? env.HERDR_PLUGIN_CONTEXT_JSON : rawEvent,
+  );
   if (!context) return { status: 'invalid-context' };
   const api = herdr ?? createHerdr({
     bin: env.HERDR_BIN_PATH || 'herdr',
