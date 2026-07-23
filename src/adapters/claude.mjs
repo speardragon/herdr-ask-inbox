@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import { normalizeRequest, requestId, validateResponse } from '../schema.mjs';
 
 function requireNonEmptyString(value, name) {
-  if (typeof value !== 'string' || value.length === 0) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error(`${name} must be a non-empty string`);
   }
   return value;
@@ -27,22 +28,38 @@ function questionsFrom(payload) {
     throw new Error('AskUserQuestion requires one to four questions');
   }
 
+  const projected = [];
+  const seenQuestions = new Set();
   for (const [questionIndex, question] of questions.entries()) {
     requireNonEmptyString(question?.question, `questions[${questionIndex}].question`);
     requireNonEmptyString(question?.header, `questions[${questionIndex}].header`);
-    if (typeof question?.multiSelect !== 'boolean') {
+    if (question?.multiSelect !== undefined && typeof question.multiSelect !== 'boolean') {
       throw new Error(`questions[${questionIndex}].multiSelect must be a boolean`);
     }
     if (!Array.isArray(question.options) || question.options.length < 2 || question.options.length > 4) {
       throw new Error(`questions[${questionIndex}].options must contain two to four choices`);
     }
-    for (const [optionIndex, option] of question.options.entries()) {
+    const questionKey = question.question.trim();
+    if (seenQuestions.has(questionKey)) throw new Error('duplicate question text');
+    seenQuestions.add(questionKey);
+    const seenLabels = new Set();
+    const options = question.options.map((option, optionIndex) => {
       requireNonEmptyString(option?.label, `questions[${questionIndex}].options[${optionIndex}].label`);
       requireNonEmptyString(option?.description, `questions[${questionIndex}].options[${optionIndex}].description`);
-    }
+      const labelKey = option.label.trim();
+      if (seenLabels.has(labelKey)) throw new Error('duplicate option label');
+      seenLabels.add(labelKey);
+      return { label: option.label, description: option.description };
+    });
+    projected.push({
+      question: question.question,
+      header: question.header,
+      options,
+      multiSelect: question.multiSelect ?? false,
+    });
   }
 
-  return structuredClone(questions);
+  return projected;
 }
 
 export function normalizeHook(payload, env = process.env) {
@@ -53,6 +70,12 @@ export function normalizeHook(payload, env = process.env) {
   }
 
   const source = sourceFrom(payload, env);
+  const invocationNonce = randomUUID();
+  const upstreamInvocationId = typeof payload.tool_use_id === 'string' && payload.tool_use_id.trim().length > 0
+    ? payload.tool_use_id
+    : typeof payload.turn_id === 'string' && payload.turn_id.trim().length > 0
+      ? payload.turn_id
+      : null;
   const questions = isQuestion ? questionsFrom(payload) : null;
   const permission = isPermission ? {
     tool_name: requireNonEmptyString(payload.tool_name, 'tool_name'),
@@ -70,7 +93,7 @@ export function normalizeHook(payload, env = process.env) {
     paneId: source.pane_id,
     sessionId: source.session_id,
     turnId: source.turn_id ?? null,
-    toolUseId: payload.tool_use_id ?? null,
+    invocationId: upstreamInvocationId ?? invocationNonce,
     event: payload.hook_event_name,
     toolName: payload.tool_name,
     input: payload.tool_input,
@@ -80,6 +103,7 @@ export function normalizeHook(payload, env = process.env) {
   const detail = {
     hook_event_name: payload.hook_event_name,
     tool_name: payload.tool_name,
+    invocation_nonce: invocationNonce,
   };
   if (typeof payload.tool_use_id === 'string' && payload.tool_use_id.length > 0) {
     detail.tool_use_id = payload.tool_use_id;

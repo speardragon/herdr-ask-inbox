@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import { normalizeRequest, requestId, validateResponse } from '../schema.mjs';
 
 function requireNonEmptyString(value, name) {
-  if (typeof value !== 'string' || value.length === 0) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error(`${name} must be a non-empty string`);
   }
   return value;
@@ -27,6 +28,9 @@ function questionsFrom(payload) {
     throw new Error('request_user_input requires one to three questions');
   }
 
+  const projected = [];
+  const seenQuestionIds = new Set();
+  const seenQuestions = new Set();
   for (const [questionIndex, question] of questions.entries()) {
     requireNonEmptyString(question?.id, `questions[${questionIndex}].id`);
     requireNonEmptyString(question?.question, `questions[${questionIndex}].question`);
@@ -34,14 +38,35 @@ function questionsFrom(payload) {
     if (!Array.isArray(question.options) || question.options.length < 2 || question.options.length > 3) {
       throw new Error(`questions[${questionIndex}].options must contain two or three choices`);
     }
-    for (const [optionIndex, option] of question.options.entries()) {
+    const questionId = question.id.trim();
+    const questionText = question.question.trim();
+    if (seenQuestionIds.has(questionId)) throw new Error('duplicate question id');
+    if (seenQuestions.has(questionText)) throw new Error('duplicate question text');
+    seenQuestionIds.add(questionId);
+    seenQuestions.add(questionText);
+    const seenLabels = new Set();
+    const options = question.options.map((option, optionIndex) => {
       requireNonEmptyString(option?.label, `questions[${questionIndex}].options[${optionIndex}].label`);
       requireNonEmptyString(option?.description, `questions[${questionIndex}].options[${optionIndex}].description`);
-    }
+      const label = option.label.trim();
+      if (seenLabels.has(label)) throw new Error('duplicate option label');
+      seenLabels.add(label);
+      return { label: option.label, description: option.description };
+    });
+    projected.push({
+      id: question.id,
+      question: question.question,
+      header: question.header,
+      options,
+    });
   }
 
-  return structuredClone(questions);
+  return projected;
 }
+
+const SUPPORTED_QUESTION_PROFILES = new Map([
+  ['0.101.0', 'codex-request-user-input-v1'],
+]);
 
 export function normalizeHook(payload, env = process.env) {
   const isQuestion = payload?.hook_event_name === 'PreToolUse' && payload?.tool_name === 'request_user_input';
@@ -51,40 +76,42 @@ export function normalizeHook(payload, env = process.env) {
   }
 
   const source = sourceFrom(payload, env);
+  const invocationNonce = randomUUID();
+  const upstreamInvocationId = typeof payload.tool_use_id === 'string' && payload.tool_use_id.trim().length > 0
+    ? payload.tool_use_id
+    : typeof payload.turn_id === 'string' && payload.turn_id.trim().length > 0
+      ? payload.turn_id
+      : null;
   const questions = isQuestion ? questionsFrom(payload) : null;
   const permission = isPermission ? {
     tool_name: requireNonEmptyString(payload.tool_name, 'tool_name'),
     tool_input: structuredClone(payload.tool_input),
-    suggestions: structuredClone(payload.permission_suggestions ?? []),
   } : null;
   if (isPermission && (payload.tool_input === null || typeof payload.tool_input !== 'object')) {
     throw new Error('tool_input must be structured data');
-  }
-  if (isPermission && !Array.isArray(payload.permission_suggestions ?? [])) {
-    throw new Error('permission_suggestions must be an array');
   }
   const id = requestId({
     agent: 'codex',
     paneId: source.pane_id,
     sessionId: source.session_id,
     turnId: source.turn_id ?? null,
-    toolUseId: payload.tool_use_id ?? null,
+    invocationId: upstreamInvocationId ?? invocationNonce,
     event: payload.hook_event_name,
     toolName: payload.tool_name,
     input: payload.tool_input,
-    permissionSuggestions: payload.permission_suggestions ?? [],
   });
   const firstQuestion = questions?.[0];
   const detail = {
     hook_event_name: payload.hook_event_name,
     tool_name: payload.tool_name,
+    invocation_nonce: invocationNonce,
   };
   if (isQuestion) {
-    detail.screen_profile = 'codex-request-user-input-v1';
+    detail.screen_profile = SUPPORTED_QUESTION_PROFILES.get(env?.CODEX_VERSION) ?? 'unsupported';
     detail.screen_signature = {
       question_id: firstQuestion.id,
       question: firstQuestion.question,
-      options: firstQuestion.options.map(({ label }) => label),
+      options: structuredClone(firstQuestion.options),
     };
   }
   if (typeof payload.tool_use_id === 'string' && payload.tool_use_id.length > 0) {
@@ -117,12 +144,6 @@ export function encodeResponse(requestValue, responseValue) {
   if (request.kind !== 'permission' || request.transport !== 'hook-response') {
     throw new Error('unsupported Codex response request');
   }
-  const hasPermission = Object.hasOwn(response.value ?? {}, 'permission');
-  const hasSuggestionIndex = Object.hasOwn(response.value ?? {}, 'suggestion_index');
-  if (response.action === 'answer' && hasPermission && hasSuggestionIndex) {
-    throw new Error('ambiguous permission selection');
-  }
-
   let decision;
   if (response.action === 'deny') {
     decision = { behavior: 'deny' };
@@ -132,16 +153,7 @@ export function encodeResponse(requestValue, responseValue) {
   } else if (response.action === 'answer' && response.value?.permission === null) {
     decision = { behavior: 'allow' };
   } else if (response.action === 'answer') {
-    const suggestionIndex = response.value?.suggestion_index;
-    const selected = Number.isSafeInteger(suggestionIndex)
-      ? request.permission.suggestions[suggestionIndex]
-      : request.permission.suggestions.find((suggestion) => (
-        isDeepStrictEqual(suggestion, response.value?.permission)
-      ));
-    if (!selected || selected.behavior !== 'allow') {
-      throw new Error('response must select an exact upstream permission suggestion');
-    }
-    decision = structuredClone(selected);
+    return null;
   } else {
     throw new Error('Codex permission requires an answer or denial');
   }
@@ -170,9 +182,12 @@ export function planQuestionKeys(requestValue, answer, screen) {
   const request = normalizeRequest(requestValue);
   if (request.source.agent !== 'codex'
     || request.kind !== 'question'
-    || request.transport !== 'terminal-keys'
-    || request.detail?.screen_profile !== 'codex-request-user-input-v1') {
+    || request.transport !== 'terminal-keys') {
     return mismatch('unsupported_request');
+  }
+  if (request.detail?.screen_profile !== 'codex-request-user-input-v1'
+    || !SUPPORTED_QUESTION_PROFILES.has(request.detail?.agent_version)) {
+    return mismatch('unsupported_version');
   }
   if (request.questions.length !== 1) return mismatch('unsupported_question_count');
 
@@ -182,17 +197,8 @@ export function planQuestionKeys(requestValue, answer, screen) {
   const signature = request.detail?.screen_signature;
   if (signature?.question_id !== question.id
     || signature.question !== question.question
-    || !isDeepStrictEqual(signature.options, question.options.map(({ label }) => label))) {
+    || !isDeepStrictEqual(signature.options, question.options)) {
     return mismatch('screen_mismatch');
-  }
-
-  const haystack = normalizedText(screenText);
-  let offset = 0;
-  for (const fragment of [signature.question, ...signature.options]) {
-    const needle = normalizedText(fragment);
-    const next = haystack.indexOf(needle, offset);
-    if (next < 0) return mismatch('screen_mismatch');
-    offset = next + needle.length;
   }
 
   const selectedLabel = typeof answer === 'string' ? answer : answer?.[question.id];
@@ -200,16 +206,34 @@ export function planQuestionKeys(requestValue, answer, screen) {
   if (targetIndex < 0) return mismatch('unsupported_answer');
 
   const plainLines = stripAnsi(screenText).split(/\r?\n/u);
+  const markerPattern = /^\s*[›>❯●]\s*/u;
+  if (plainLines.filter((line) => markerPattern.test(line)).length !== 1) {
+    return mismatch('screen_mismatch');
+  }
+  const questionLines = plainLines
+    .map((line, index) => ({ line: normalizedText(line), index }))
+    .filter(({ line }) => line.includes(normalizedText(signature.question)));
+  if (questionLines.length !== 1) return mismatch('screen_mismatch');
+  let lineIndex = questionLines[0].index + 1;
   let currentIndex = -1;
   for (const [index, option] of question.options.entries()) {
-    const line = plainLines.find((candidate) => normalizedText(candidate).includes(normalizedText(option.label)));
+    while (lineIndex < plainLines.length && normalizedText(plainLines[lineIndex]).length === 0) lineIndex += 1;
+    const line = plainLines[lineIndex];
     if (!line) return mismatch('screen_mismatch');
-    const labelOffset = normalizedText(line).indexOf(normalizedText(option.label));
     const normalizedLine = normalizedText(line);
+    const labelOffset = normalizedLine.indexOf(normalizedText(option.label));
+    const descriptionOffset = normalizedLine.indexOf(normalizedText(option.description));
+    if (labelOffset < 0 || descriptionOffset < labelOffset) return mismatch('screen_mismatch');
     const prefix = normalizedLine.slice(0, labelOffset);
     if (/[›>❯●]\s*(?:\d+[.)]\s*)?$/u.test(prefix)) currentIndex = index;
+    lineIndex += 1;
   }
   if (currentIndex < 0) return mismatch('screen_mismatch');
+  const knownFooter = /^(?:(?:press )?enter to (?:select|confirm)|(?:esc|escape) to cancel|(?:↑|↓|up|down).*(?:navigate|move))\b/iu;
+  for (; lineIndex < plainLines.length; lineIndex += 1) {
+    const trailing = normalizedText(plainLines[lineIndex]);
+    if (trailing.length > 0 && !knownFooter.test(trailing)) return mismatch('screen_mismatch');
+  }
 
   const direction = targetIndex >= currentIndex ? 'down' : 'up';
   const keys = Array.from({ length: Math.abs(targetIndex - currentIndex) }, () => direction);

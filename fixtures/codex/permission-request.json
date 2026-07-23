@@ -9,15 +9,5 @@
   "tool_input": {
     "command": "npm test",
     "description": "Run the local test suite."
-  },
-  "permission_suggestions": [
-    {
-      "behavior": "allow",
-      "scope": "prefix",
-      "prefix": [
-        "npm",
-        "test"
-      ]
-    }
-  ]
+  }
 }
