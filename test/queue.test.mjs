@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,7 +11,7 @@ function request(id, createdAtMs, overrides = {}) {
     schema_version: 1,
     request_id: id,
     created_at_ms: createdAtMs,
-    source: { agent: 'claude', pane_id: 'w1:p1', session_id: 's1' },
+    source: { agent: 'claude', pane_id: 'w1:p1', workspace_id: 'w1', session_id: 's1' },
     kind: 'question',
     transport: 'hook-response',
     status: 'waiting',
@@ -25,6 +25,12 @@ async function withQueue(t) {
   return openQueue(root);
 }
 
+async function seedJson(root, directory, id, value) {
+  const target = join(root, directory);
+  await mkdir(target, { recursive: true });
+  await writeFile(join(target, `${id}.json`), `${JSON.stringify(value)}\n`);
+}
+
 test('enqueue is idempotent and list is FIFO with a stable ID tie-breaker', async (t) => {
   const queue = await withQueue(t);
   await queue.enqueue(request('c', 20));
@@ -33,6 +39,23 @@ test('enqueue is idempotent and list is FIFO with a stable ID tie-breaker', asyn
   await queue.enqueue(request('a', 10));
 
   assert.deepEqual((await queue.list()).map((entry) => entry.request_id), ['a', 'b', 'c']);
+});
+
+test('same-ID concurrent enqueues preserve one complete first payload', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const [leftQueue, rightQueue] = await Promise.all([openQueue(root), openQueue(root)]);
+  const left = request('same', 10, { title: 'short' });
+  const right = request('same', 10, { title: 'x'.repeat(64_000) });
+
+  const [leftResult, rightResult] = await Promise.all([
+    leftQueue.enqueue(left),
+    rightQueue.enqueue(right),
+  ]);
+  const [stored] = await leftQueue.list();
+
+  assert.deepEqual(leftResult, rightResult);
+  assert.deepEqual(stored, leftResult);
 });
 
 test('response publication is one-shot', async (t) => {
@@ -62,6 +85,22 @@ test('competing response publications accept exactly one decision', async (t) =>
 
   assert.equal(results.filter(({ status }) => status === 'fulfilled').length, 1);
   assert.match((await queue.takeResponse('a')).action, /^(deny|handoff)$/);
+});
+
+test('a consumed response remains complete during publisher races and duplicate hooks', async (t) => {
+  const queue = await withQueue(t);
+  await queue.enqueue(request('a', 10));
+  const base = { schema_version: 1, request_id: 'a', value: null, created_at_ms: 11 };
+
+  const consumer = queue.waitForResponse('a', { timeoutMs: 1_000 });
+  const publications = await Promise.allSettled(Array.from({ length: 30 }, (_, index) => (
+    queue.respond({ ...base, action: index % 2 === 0 ? 'deny' : 'handoff' })
+  )));
+  assert.match((await consumer).action, /^(deny|handoff)$/);
+  assert.equal(publications.filter(({ status }) => status === 'fulfilled').length, 1);
+
+  await queue.enqueue(request('a', 10, { title: 'duplicate hook must stay completed' }));
+  assert.deepEqual(await queue.list(), []);
 });
 
 test('waitForResponse returns a published response and times out without one', async (t) => {
@@ -114,4 +153,113 @@ test('withPopupLock serializes competing popup work and releases afterward', asy
   assert.equal(maximumActive, 1);
   assert.deepEqual(completed.sort(), ['first', 'second']);
   assert.equal(await queue.withPopupLock(async () => 'released'), 'released');
+});
+
+test('concurrent stale-lock recoverers never remove a new popup owner', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-stale-lock-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await seedJson(root, 'locks/popup.lock', 'owner', {
+    pid: 999_999_999,
+    created_at_ms: 0,
+    token: 'stale-owner',
+  });
+  const queue = await openQueue(root);
+  let active = 0;
+  let maximumActive = 0;
+
+  await Promise.all(Array.from({ length: 20 }, () => queue.withPopupLock(async () => {
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+  }, { timeoutMs: 5_000 })));
+
+  assert.equal(maximumActive, 1);
+});
+
+test('stale lock recovery handles PID reuse, corrupt owners, and future timestamps', async (t) => {
+  const roots = [];
+  t.after(() => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
+
+  async function recover(ownerContents, { oldDirectory = false } = {}) {
+    const root = await mkdtemp(join(tmpdir(), 'herdr-question-owner-'));
+    roots.push(root);
+    const lockDirectory = join(root, 'locks', 'popup.lock');
+    await mkdir(lockDirectory, { recursive: true });
+    await writeFile(join(lockDirectory, 'owner.json'), ownerContents);
+    if (oldDirectory) await utimes(lockDirectory, new Date(0), new Date(0));
+    const queue = await openQueue(root);
+    return queue.withPopupLock(async () => 'recovered', { timeoutMs: 2_000 });
+  }
+
+  assert.equal(await recover(JSON.stringify({
+    pid: process.pid,
+    process_started_at_ms: 0,
+    acquired_at_ms: 0,
+    nonce: 'previous-process',
+  })), 'recovered');
+  assert.equal(await recover('{broken-json', { oldDirectory: true }), 'recovered');
+  assert.equal(await recover(JSON.stringify({
+    pid: 999_999_999,
+    process_started_at_ms: Date.now() + 60_000,
+    acquired_at_ms: Date.now() + 60_000,
+    nonce: 'future-clock',
+  }), { oldDirectory: true }), 'recovered');
+});
+
+test('startup recovers abandoned request and response claims without reviving completion', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-fault-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const response = (id) => ({
+    schema_version: 1,
+    request_id: id,
+    action: 'handoff',
+    value: null,
+    created_at_ms: 20,
+  });
+  await seedJson(root, 'request-claims', 'a', request('a', 10));
+  await seedJson(root, 'requests', 'b', request('b', 11));
+  await seedJson(root, 'responses', 'b', response('b'));
+  await seedJson(root, 'response-claims', 'c', response('c'));
+  await seedJson(root, 'tombstones', 'c', {
+    schema_version: 1,
+    request_id: 'c',
+    state: 'responded',
+    updated_at_ms: 21,
+  });
+  await seedJson(root, 'response-claims', 'd', response('d'));
+  await seedJson(root, 'tombstones', 'd', {
+    schema_version: 1,
+    request_id: 'd',
+    state: 'consumed',
+    updated_at_ms: 21,
+  });
+
+  const queue = await openQueue(root);
+  assert.deepEqual((await queue.list()).map(({ request_id }) => request_id), ['a']);
+  assert.equal((await queue.takeResponse('b')).request_id, 'b');
+  assert.equal((await queue.takeResponse('c')).request_id, 'c');
+  assert.equal(await queue.takeResponse('d'), null);
+  await queue.enqueue(request('b', 11));
+  assert.deepEqual((await queue.list()).map(({ request_id }) => request_id), ['a']);
+});
+
+test('queue storage rejects symlink directories and enforces private modes', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-modes-'));
+  const outside = await mkdtemp(join(tmpdir(), 'herdr-question-outside-'));
+  t.after(() => Promise.all([
+    rm(root, { recursive: true, force: true }),
+    rm(outside, { recursive: true, force: true }),
+  ]));
+  await symlink(outside, join(root, 'requests'));
+  await assert.rejects(() => openQueue(root), /symlink|directory/);
+
+  await rm(join(root, 'requests'));
+  await seedJson(root, 'requests', 'preexisting', request('preexisting', 9));
+  const queue = await openQueue(root);
+  await queue.enqueue(request('private', 10));
+  assert.equal((await stat(root)).mode & 0o777, 0o700);
+  assert.equal((await lstat(join(root, 'requests'))).mode & 0o777, 0o700);
+  assert.equal((await stat(join(root, 'requests', 'preexisting.json'))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(root, 'requests', 'private.json'))).mode & 0o777, 0o600);
 });

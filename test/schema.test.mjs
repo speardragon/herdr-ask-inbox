@@ -32,7 +32,7 @@ test('unknown transports are rejected', () => {
   assert.throws(() => normalizeRequest({
     schema_version: 1,
     request_id: 'r1',
-    source: { pane_id: 'w1:p1', agent: 'claude' },
+    source: { pane_id: 'w1:p1', workspace_id: 'w1', session_id: 's1', agent: 'claude' },
     kind: 'question',
     transport: 'magic',
   }), /transport/);
@@ -43,7 +43,7 @@ test('request normalization enforces the identity contract and returns an isolat
     schema_version: 1,
     request_id: 'r1',
     created_at_ms: 10,
-    source: { pane_id: 'w1:p1', agent: 'claude' },
+    source: { pane_id: 'w1:p1', workspace_id: 'w1', session_id: 's1', agent: 'claude' },
     kind: 'question',
     transport: 'hook-response',
     status: 'waiting',
@@ -93,4 +93,44 @@ test('safe diagnostics omit request content and answers', () => {
     status: 'waiting',
     outcome: 'handoff',
   });
+});
+
+test('request normalization rejects malformed scalars and non-JSON data', () => {
+  const valid = {
+    schema_version: 1,
+    request_id: 'r1',
+    created_at_ms: 10,
+    source: {
+      agent: 'claude',
+      pane_id: 'w1:p1',
+      workspace_id: 'w1',
+      session_id: 's1',
+    },
+    kind: 'question',
+    transport: 'hook-response',
+    status: 'waiting',
+    detail: {},
+  };
+
+  for (const malformed of [
+    { ...valid, request_id: { secret: true } },
+    { ...valid, created_at_ms: Number.NaN },
+    { ...valid, created_at_ms: 1.5 },
+    { ...valid, status: 'approved' },
+    { ...valid, source: { ...valid.source, workspace_id: 1 } },
+    { ...valid, source: { ...valid.source, session_id: null } },
+    { ...valid, detail: { value: undefined } },
+    { ...valid, detail: new Date() },
+  ]) {
+    assert.throws(() => normalizeRequest(malformed));
+  }
+});
+
+test('safe diagnostics never copy structured or unknown outcomes', () => {
+  const structured = safeDiagnostic({ request_id: 'r1', outcome: { answer: 'secret' } });
+  const unknown = safeDiagnostic({ request_id: 'r1', outcome: 'allowed-secret-command' });
+
+  assert.equal(structured.outcome, undefined);
+  assert.equal(unknown.outcome, undefined);
+  assert.equal(JSON.stringify(structured).includes('secret'), false);
 });
