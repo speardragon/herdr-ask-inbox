@@ -73,21 +73,31 @@ async function ensureParent(path) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 }
 
-async function atomicWrite(path, bytes, mode, { expectedSnapshot } = {}) {
+async function atomicWrite(path, bytes, mode, { expectedSnapshot, onCommitted } = {}) {
   await ensureParent(path);
   const temporaryPath = join(dirname(path), `.${path.split('/').at(-1)}.${process.pid}.${randomUUID()}.tmp`);
+  let committedSnapshot;
   try {
     const handle = await open(temporaryPath, 'wx', mode);
     try {
       await handle.writeFile(bytes);
       await handle.chmod(mode);
       await handle.sync();
+      const metadata = await handle.stat({ bigint: true });
+      committedSnapshot = {
+        bytes: Buffer.from(bytes),
+        mode: Number(metadata.mode & 0o777n),
+        dev: metadata.dev.toString(),
+        ino: metadata.ino.toString(),
+        exists: true,
+      };
     } finally {
       await handle.close();
     }
     if (expectedSnapshot) await assertSnapshotUnchanged(path, expectedSnapshot);
     await rename(temporaryPath, path);
-    return await snapshotFile(path);
+    await onCommitted?.();
+    return committedSnapshot;
   } catch (error) {
     await unlink(temporaryPath).catch(() => {});
     throw error;
@@ -193,7 +203,7 @@ async function assertSnapshotUnchanged(path, expected, options) {
   return current;
 }
 
-async function safeChmod(path, mode, expected) {
+async function safeChmod(path, mode, expected, { onCommitted } = {}) {
   await assertSnapshotUnchanged(path, expected, { includeMode: true });
   let handle;
   try {
@@ -208,10 +218,15 @@ async function safeChmod(path, mode, expected) {
       throw conflictError(path);
     }
     await handle.chmod(mode);
+    await onCommitted?.();
   } finally {
     await handle.close();
   }
-  return snapshotFile(path);
+  return {
+    ...expected,
+    bytes: Buffer.from(expected.bytes),
+    mode,
+  };
 }
 
 async function restoreMutation(mutation) {
@@ -297,6 +312,9 @@ function resolveOptions(options = {}) {
   }
   if (options.onBackup !== undefined && typeof options.onBackup !== 'function') {
     throw new Error('onBackup must be a function');
+  }
+  if (options.onArtifactCommitted !== undefined && typeof options.onArtifactCommitted !== 'function') {
+    throw new Error('onArtifactCommitted must be a function');
   }
   return options;
 }
@@ -475,6 +493,11 @@ export async function uninstallHooks(rawOptions) {
         mutated.push(mutation);
         mutation.expectedAfter = await atomicWrite(artifact.path, artifact.nextBytes, 0o600, {
           expectedSnapshot: artifact.snapshot,
+          onCommitted: () => options.onArtifactCommitted?.({
+            name: artifact.name,
+            operation: 'replace',
+            path: artifact.path,
+          }),
         });
         JSON.parse(await readFile(artifact.path, 'utf8'));
       }
@@ -575,6 +598,11 @@ export async function installHooks(rawOptions) {
         mutated.push(mutation);
         mutation.expectedAfter = await atomicWrite(artifact.path, artifact.next, 0o600, {
           expectedSnapshot: artifact.snapshot,
+          onCommitted: () => options.onArtifactCommitted?.({
+            name: artifact.name,
+            operation: 'replace',
+            path: artifact.path,
+          }),
         });
       } else if (artifact.snapshot.mode !== 0o600) {
         const mutation = {
@@ -584,7 +612,13 @@ export async function installHooks(rawOptions) {
           expectedAfter: null,
         };
         mutated.push(mutation);
-        mutation.expectedAfter = await safeChmod(artifact.path, 0o600, artifact.snapshot);
+        mutation.expectedAfter = await safeChmod(artifact.path, 0o600, artifact.snapshot, {
+          onCommitted: () => options.onArtifactCommitted?.({
+            name: artifact.name,
+            operation: 'chmod',
+            path: artifact.path,
+          }),
+        });
       }
       await verifyConfig(artifact.path, artifact.definitions);
       results.push({ name: artifact.name, path: artifact.path, changed: artifact.changed, backupPath });
@@ -599,6 +633,11 @@ export async function installHooks(rawOptions) {
       mutated.push(mutation);
       mutation.expectedAfter = await atomicWrite(launcherPath, launcher, 0o700, {
         expectedSnapshot: launcherSnapshot,
+        onCommitted: () => options.onArtifactCommitted?.({
+          name: 'launcher',
+          operation: 'replace',
+          path: launcherPath,
+        }),
       });
     } else if (launcherSnapshot.mode !== 0o700) {
       const mutation = {
@@ -608,7 +647,13 @@ export async function installHooks(rawOptions) {
         expectedAfter: null,
       };
       mutated.push(mutation);
-      mutation.expectedAfter = await safeChmod(launcherPath, 0o700, launcherSnapshot);
+      mutation.expectedAfter = await safeChmod(launcherPath, 0o700, launcherSnapshot, {
+        onCommitted: () => options.onArtifactCommitted?.({
+          name: 'launcher',
+          operation: 'chmod',
+          path: launcherPath,
+        }),
+      });
     }
     for (const artifact of prepared) {
       await verifyConfig(artifact.path, artifact.definitions);

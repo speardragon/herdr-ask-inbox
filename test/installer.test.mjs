@@ -406,3 +406,67 @@ test('rollback never overwrites an external edit to an artifact already written 
   assert.equal((await readJson(options.claudePath)).external_claude, true);
   assert.equal((await readJson(options.codexPath)).external_codex, true);
 });
+
+test('rollback preserves external bytes and mode written immediately after atomic rename', async (t) => {
+  const options = await setup(t);
+  await writeJson(options.claudePath, { hooks: {}, original: 'claude' });
+  await writeJson(options.codexPath, { hooks: {}, original: 'codex' });
+  let externalBytes;
+  let committed = false;
+
+  await assert.rejects(() => installHooks({
+    ...options,
+    onArtifactCommitted: async ({ name, operation, path }) => {
+      if (name !== 'claude' || operation !== 'replace' || committed) return;
+      committed = true;
+      const external = await readJson(path);
+      external.external_after_rename = true;
+      externalBytes = Buffer.from(`${JSON.stringify(external, null, 2)}\n`);
+      await writeFile(path, externalBytes, { mode: 0o600 });
+      await chmod(path, 0o640);
+    },
+    onBackup: async ({ name, path }) => {
+      if (name !== 'codex') return;
+      const external = await readJson(path);
+      external.force_later_conflict = true;
+      await writeJson(path, external);
+    },
+  }), /changed during hook transaction/);
+
+  assert.equal(committed, true);
+  assert.deepEqual(await readFile(options.claudePath), externalBytes);
+  assert.equal((await stat(options.claudePath)).mode & 0o777, 0o640);
+});
+
+test('rollback preserves external bytes and mode written immediately after chmod', async (t) => {
+  const options = await setup(t);
+  await installHooks(options);
+  await chmod(options.claudePath, 0o644);
+  const codex = await readJson(options.codexPath);
+  await writeFile(options.codexPath, JSON.stringify(codex), { mode: 0o600 });
+  let externalBytes;
+  let committed = false;
+
+  await assert.rejects(() => installHooks({
+    ...options,
+    onArtifactCommitted: async ({ name, operation, path }) => {
+      if (name !== 'claude' || operation !== 'chmod' || committed) return;
+      committed = true;
+      const external = await readJson(path);
+      external.external_after_chmod = true;
+      externalBytes = Buffer.from(`${JSON.stringify(external, null, 2)}\n`);
+      await writeFile(path, externalBytes, { mode: 0o600 });
+      await chmod(path, 0o640);
+    },
+    onBackup: async ({ name, path }) => {
+      if (name !== 'codex') return;
+      const external = await readJson(path);
+      external.force_later_conflict = true;
+      await writeJson(path, external);
+    },
+  }), /changed during hook transaction/);
+
+  assert.equal(committed, true);
+  assert.deepEqual(await readFile(options.claudePath), externalBytes);
+  assert.equal((await stat(options.claudePath)).mode & 0o777, 0o640);
+});
