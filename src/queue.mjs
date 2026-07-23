@@ -19,6 +19,9 @@ import { normalizeRequest, validateResponse } from './schema.mjs';
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const LOCK_STALE_MS = 30_000;
 const PROCESS_STARTED_AT_MS = Math.round(Date.now() - process.uptime() * 1_000);
+const TOMBSTONE_MIN_RETENTION_MS = 60 * 60 * 1_000;
+const TOMBSTONE_MAX_RETENTION_MS = 24 * 60 * 60 * 1_000;
+const TOMBSTONE_MAX_COUNT = 128;
 
 function processIsAbsent(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return true;
@@ -176,19 +179,18 @@ class Queue {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error('timeoutMs must be a non-negative number');
 
     const ownerPath = join(lockDirectory, 'owner.json');
-    const recoveryDirectory = `${lockDirectory}.recovery`;
+    const legacyRecoveryDirectory = `${lockDirectory}.recovery`;
+    const staleDirectory = `${lockDirectory}.stale`;
     const nonce = randomUUID();
     const deadline = Date.now() + timeoutMs;
 
     while (true) {
-      if (await exists(recoveryDirectory)) {
-        if (Date.now() >= deadline) {
-          const timeoutError = new Error('lock recovery timed out');
-          timeoutError.code = 'QUEUE_LOCK_TIMEOUT';
-          throw timeoutError;
-        }
-        await delay(5 + Math.floor(Math.random() * 11));
-        continue;
+      if (await exists(legacyRecoveryDirectory)) {
+        const legacyQuarantine = `${legacyRecoveryDirectory}.legacy.${process.pid}.${randomUUID()}`;
+        await rename(legacyRecoveryDirectory, legacyQuarantine).catch((error) => {
+          if (error.code !== 'ENOENT') throw error;
+        });
+        await rm(legacyQuarantine, { recursive: true, force: true });
       }
       try {
         await mkdir(lockDirectory, { mode: 0o700 });
@@ -205,6 +207,7 @@ class Queue {
           await rm(failedDirectory, { recursive: true, force: true }).catch(() => {});
           throw error;
         }
+        await rm(staleDirectory, { recursive: true, force: true });
         break;
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
@@ -222,30 +225,15 @@ class Queue {
 
         if (lockStat && lockIsStale(owner, lockStat)) {
           try {
-            await mkdir(recoveryDirectory, { mode: 0o700 });
-          } catch (guardError) {
-            if (guardError.code === 'EEXIST') continue;
-            throw guardError;
-          }
-          try {
-            const currentStat = await lstat(lockDirectory).catch(() => null);
-            let currentOwner = null;
-            try {
-              currentOwner = await readJson(ownerPath);
-            } catch (readError) {
-              if (readError.code !== 'ENOENT' && !(readError instanceof SyntaxError)) throw readError;
-            }
-            if (currentStat && lockIsStale(currentOwner, currentStat)) {
-              const quarantine = `${lockDirectory}.stale.${process.pid}.${randomUUID()}`;
-              await rename(lockDirectory, quarantine).catch((renameError) => {
-                if (renameError.code !== 'ENOENT') throw renameError;
-              });
-              await rm(quarantine, { recursive: true, force: true });
-            }
-          } finally {
-            await rm(recoveryDirectory, { recursive: true, force: true });
+            await rename(lockDirectory, staleDirectory);
+          } catch (renameError) {
+            if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(renameError.code)) throw renameError;
           }
           continue;
+        }
+
+        if (await exists(staleDirectory)) {
+          await rm(staleDirectory, { recursive: true, force: true });
         }
 
         if (Date.now() >= deadline) {
@@ -446,7 +434,6 @@ class Queue {
       this.responsesDirectory,
       this.requestClaimsDirectory,
       this.responseClaimsDirectory,
-      this.tombstonesDirectory,
     ];
     const identifiers = new Set();
     for (const directory of directories) {
@@ -458,6 +445,43 @@ class Queue {
     }
     for (const requestId of identifiers) {
       await this.withRequestLock(requestId, () => this.recoverRequestState(requestId));
+    }
+  }
+
+  async gcTombstones(now = Date.now()) {
+    const entries = [];
+    for (const filename of await readdir(this.tombstonesDirectory)) {
+      if (!filename.endsWith('.json') || filename.startsWith('.')) continue;
+      const path = join(this.tombstonesDirectory, filename);
+      let tombstone;
+      try {
+        tombstone = await readJson(path);
+      } catch {
+        continue;
+      }
+      const requestId = filename.slice(0, -'.json'.length);
+      const statePaths = this.paths(requestId);
+      const hasRecoverableState = await Promise.all([
+        exists(statePaths.request),
+        exists(statePaths.response),
+        exists(statePaths.requestClaim),
+        exists(statePaths.responseClaim),
+      ]).then((states) => states.some(Boolean));
+      entries.push({
+        path,
+        hasRecoverableState,
+        updatedAt: Number.isSafeInteger(tombstone?.updated_at_ms) ? tombstone.updated_at_ms : Number.POSITIVE_INFINITY,
+      });
+    }
+
+    entries.sort((left, right) => right.updatedAt - left.updatedAt || left.path.localeCompare(right.path));
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      if (entry.hasRecoverableState) continue;
+      const age = Math.max(0, now - entry.updatedAt);
+      const expired = age > TOMBSTONE_MAX_RETENTION_MS;
+      const overLimitAndRetrySafe = index >= TOMBSTONE_MAX_COUNT && age > TOMBSTONE_MIN_RETENTION_MS;
+      if (expired || overLimitAndRetrySafe) await durableUnlink(entry.path).catch(() => {});
     }
   }
 }
@@ -480,6 +504,7 @@ export async function openQueue(root) {
     secureStateFiles(queue.responseClaimsDirectory),
     secureStateFiles(queue.tombstonesDirectory),
   ]);
+  await queue.gcTombstones();
   await queue.recoverAll();
   return queue;
 }

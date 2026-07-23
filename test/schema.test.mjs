@@ -134,3 +134,50 @@ test('safe diagnostics never copy structured or unknown outcomes', () => {
   assert.equal(unknown.outcome, undefined);
   assert.equal(JSON.stringify(structured).includes('secret'), false);
 });
+
+test('plain JSON question and permission arrays are valid schema data', () => {
+  const base = {
+    schema_version: 1,
+    request_id: 'arrays',
+    created_at_ms: 10,
+    source: {
+      agent: 'claude',
+      pane_id: 'w1:p1',
+      workspace_id: 'w1',
+      session_id: 's1',
+    },
+    kind: 'question',
+    transport: 'hook-response',
+    status: 'waiting',
+  };
+  const questions = [{
+    question: 'Choose?',
+    options: [{ label: 'One', description: 'First' }, { label: 'Two', description: 'Second' }],
+    multiSelect: false,
+  }];
+  const permissionSuggestions = [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'git status' }] }];
+
+  assert.deepEqual(normalizeRequest({ ...base, questions, permission: { suggestions: permissionSuggestions } }).questions, questions);
+  assert.equal(typeof requestId({ questions, permissionSuggestions }), 'string');
+
+  const exotic = [...questions];
+  Object.defineProperty(exotic, 'secret', { enumerable: true, value: 'do-not-copy' });
+  assert.throws(() => normalizeRequest({ ...base, questions: exotic }), /array|JSON/);
+});
+
+test('safe diagnostics emit only allowlisted scalar metadata', () => {
+  const secret = { token: 'do-not-copy' };
+  const diagnostic = safeDiagnostic({
+    schema_version: secret,
+    request_id: ['secret-id'],
+    created_at_ms: secret,
+    source: { agent: secret, pane_id: ['secret-pane'], workspace_id: secret },
+    kind: secret,
+    transport: ['hook-response'],
+    status: secret,
+    outcome: secret,
+  });
+
+  assert.equal(Object.values(diagnostic).every((value) => value === undefined || ['string', 'number', 'boolean'].includes(typeof value)), true);
+  assert.equal(JSON.stringify(diagnostic).includes('secret'), false);
+});

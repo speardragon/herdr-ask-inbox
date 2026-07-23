@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -177,7 +177,7 @@ test('concurrent stale-lock recoverers never remove a new popup owner', async (t
   assert.equal(maximumActive, 1);
 });
 
-test('stale lock recovery handles PID reuse, corrupt owners, and future timestamps', async (t) => {
+test('stale lock recovery handles current-PID fingerprints, corrupt owners, and future timestamps', async (t) => {
   const roots = [];
   t.after(() => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
 
@@ -205,6 +205,32 @@ test('stale lock recovery handles PID reuse, corrupt owners, and future timestam
     acquired_at_ms: Date.now() + 60_000,
     nonce: 'future-clock',
   }), { oldDirectory: true }), 'recovered');
+});
+
+test('an abandoned legacy recovery guard cannot block concurrent popup recovery', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-recovery-guard-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await seedJson(root, 'locks/popup.lock', 'owner', {
+    pid: 999_999_999,
+    created_at_ms: 0,
+    token: 'stale-owner',
+  });
+  await seedJson(root, 'locks/popup.lock.recovery', 'owner', {
+    pid: 999_999_999,
+    acquired_at_ms: 0,
+    nonce: 'abandoned-recovery',
+  });
+  const queue = await openQueue(root);
+  let active = 0;
+  let maximumActive = 0;
+
+  await Promise.all(Array.from({ length: 8 }, () => queue.withPopupLock(async () => {
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+  }, { timeoutMs: 500 })));
+  assert.equal(maximumActive, 1);
 });
 
 test('startup recovers abandoned request and response claims without reviving completion', async (t) => {
@@ -262,4 +288,50 @@ test('queue storage rejects symlink directories and enforces private modes', asy
   assert.equal((await lstat(join(root, 'requests'))).mode & 0o777, 0o700);
   assert.equal((await stat(join(root, 'requests', 'preexisting.json'))).mode & 0o777, 0o600);
   assert.equal((await stat(join(root, 'requests', 'private.json'))).mode & 0o777, 0o600);
+});
+
+test('tombstone-only IDs do not acquire per-request recovery locks', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-tombstone-skip-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await seedJson(root, 'tombstones', 'complete', {
+    schema_version: 1,
+    request_id: 'complete',
+    state: 'consumed',
+    updated_at_ms: Date.now(),
+  });
+  await seedJson(root, 'locks/request-complete.lock', 'owner', {
+    pid: process.pid,
+    process_started_at_ms: Date.now(),
+    acquired_at_ms: Date.now(),
+    nonce: 'active-unrelated-lock',
+  });
+
+  const queue = await openQueue(root);
+  assert.deepEqual(await queue.list(), []);
+});
+
+test('tombstone GC bounds old entries while retaining recent duplicate protection', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-question-tombstone-gc-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1_000;
+  for (let index = 0; index < 140; index += 1) {
+    const id = `old-${String(index).padStart(3, '0')}`;
+    await seedJson(root, 'tombstones', id, {
+      schema_version: 1,
+      request_id: id,
+      state: 'consumed',
+      updated_at_ms: twoHoursAgo - index,
+    });
+  }
+  await seedJson(root, 'tombstones', 'recent', {
+    schema_version: 1,
+    request_id: 'recent',
+    state: 'consumed',
+    updated_at_ms: Date.now(),
+  });
+
+  const queue = await openQueue(root);
+  assert.equal((await readdir(join(root, 'tombstones'))).filter((name) => name.endsWith('.json')).length <= 128, true);
+  await queue.enqueue(request('recent', Date.now()));
+  assert.deepEqual(await queue.list(), []);
 });

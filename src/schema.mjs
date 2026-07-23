@@ -2,6 +2,14 @@ import { createHash } from 'node:crypto';
 
 const REQUEST_STATUSES = new Set(['waiting', 'armed']);
 const DIAGNOSTIC_OUTCOMES = new Set(['answer', 'deny', 'handoff', 'cancelled', 'timeout', 'error']);
+const AGENTS = new Set(['claude', 'codex']);
+const KINDS = new Set(['question', 'permission']);
+const TRANSPORTS = new Set(['hook-response', 'terminal-keys']);
+
+function safeString(value, allowed) {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  return !allowed || allowed.has(value) ? value : undefined;
+}
 
 function requireString(value, name) {
   if (typeof value !== 'string' || value.length === 0) {
@@ -25,7 +33,24 @@ function assertPlainJson(value, path = 'value', ancestors = new Set()) {
   if (ancestors.has(value)) throw new Error(`${path} must not contain cycles`);
 
   const prototype = Object.getPrototypeOf(value);
-  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+  if (Array.isArray(value)) {
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const expectedKeys = new Set(['length', ...Array.from({ length: value.length }, (_, index) => String(index))]);
+    if (Reflect.ownKeys(descriptors).some((key) => typeof key !== 'string' || !expectedKeys.has(key))) {
+      throw new Error(`${path} array must not contain exotic properties`);
+    }
+    ancestors.add(value);
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[index];
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) {
+        throw new Error(`${path}.${index} must be an enumerable array element`);
+      }
+      assertPlainJson(descriptor.value, `${path}.${index}`, ancestors);
+    }
+    ancestors.delete(value);
+    return;
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
     throw new Error(`${path} must contain only plain objects and arrays`);
   }
 
@@ -106,15 +131,17 @@ export function validateResponse(value, expectedId) {
 
 export function safeDiagnostic(request) {
   return {
-    schema_version: request?.schema_version,
-    request_id: request?.request_id,
-    created_at_ms: request?.created_at_ms,
-    agent: request?.source?.agent,
-    pane_id: request?.source?.pane_id,
-    workspace_id: request?.source?.workspace_id,
-    kind: request?.kind,
-    transport: request?.transport,
-    status: request?.status,
-    outcome: DIAGNOSTIC_OUTCOMES.has(request?.outcome) ? request.outcome : undefined,
+    schema_version: request?.schema_version === 1 ? 1 : undefined,
+    request_id: safeString(request?.request_id),
+    created_at_ms: Number.isSafeInteger(request?.created_at_ms) && request.created_at_ms >= 0
+      ? request.created_at_ms
+      : undefined,
+    agent: safeString(request?.source?.agent, AGENTS),
+    pane_id: safeString(request?.source?.pane_id),
+    workspace_id: safeString(request?.source?.workspace_id),
+    kind: safeString(request?.kind, KINDS),
+    transport: safeString(request?.transport, TRANSPORTS),
+    status: safeString(request?.status, REQUEST_STATUSES),
+    outcome: safeString(request?.outcome, DIAGNOSTIC_OUTCOMES),
   };
 }
