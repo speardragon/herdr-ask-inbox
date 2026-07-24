@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createHerdr } from '../src/herdr.mjs';
 import { openQueue } from '../src/queue.mjs';
-import { claimPopupModal, clearPopupModal } from '../src/router.mjs';
+import { claimForPopup, clearLease, renewLease } from '../src/lease.mjs';
 import {
   createViewModel,
   deliverSelection,
@@ -22,6 +22,7 @@ const execFileAsync = promisify(execFileCallback);
 const PLUGIN_ID = 'ray.herdr-question';
 const POPUP_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_CONFIG_PATH_BYTES = 16_384;
+const HEARTBEAT_MS = 1_000;
 const CLEAR_SCREEN = '\u001b[2J\u001b[H';
 
 function diagnostic(stderr, message) {
@@ -136,6 +137,7 @@ export async function runPopup({
 
   let liveQueue;
   let claimed = false;
+  let heartbeat = null;
   let raw = false;
   let stopped = false;
   let exitCode = 0;
@@ -194,11 +196,17 @@ export async function runPopup({
 
   try {
     liveQueue = queue ?? await openQueue(await resolveQueueRoot(env, execFile));
-    claimed = await claimPopupModal(liveQueue, token);
+    claimed = await claimForPopup(liveQueue, token);
     if (!claimed) {
       diagnostic(stderr, 'popup modal ownership could not be claimed');
       return 3;
     }
+    // Keep the lease heartbeat fresh so waiting hooks know a popup is alive.
+    // If this popup is dismissed/killed, the heartbeat stops and hooks fail open.
+    heartbeat = setInterval(() => {
+      renewLease(liveQueue, token, Date.now()).catch(() => {});
+    }, HEARTBEAT_MS);
+    heartbeat.unref?.();
     const api = herdr ?? createHerdr({
       bin: env.HERDR_BIN_PATH || 'herdr',
       env,
@@ -291,8 +299,9 @@ export async function runPopup({
     stdout.removeListener?.('error', onRuntimeFailure);
     stderr.removeListener?.('error', onRuntimeFailure);
     await iterator?.return?.().catch(() => {});
+    if (heartbeat) clearInterval(heartbeat);
     if (claimed) {
-      await clearPopupModal(liveQueue, token).catch(() => {
+      await clearLease(liveQueue, token).catch(() => {
         diagnostic(stderr, 'popup modal cleanup failed');
       });
     }

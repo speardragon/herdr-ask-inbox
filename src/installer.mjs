@@ -23,20 +23,18 @@ function quoteShell(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-function hookCommand(configDir, agent) {
-  return `${OWNED_MARKER}=1 ${quoteShell(join(configDir, 'hook-launcher.mjs'))} --agent ${agent} --queue-root ${quoteShell(configDir)}`;
+function hookCommand(configDir) {
+  return `${OWNED_MARKER}=1 ${quoteShell(join(configDir, 'hook-launcher.mjs'))} --agent claude --queue-root ${quoteShell(configDir)}`;
 }
 
-function ownedDefinitions(configDir, agent) {
-  const command = hookCommand(configDir, agent);
-  const questionMatcher = agent === 'claude' ? 'AskUserQuestion' : '^request_user_input$';
+// v2 scope: intercept Claude AskUserQuestion only. PermissionRequest is
+// deliberately NOT hooked — leaving permission approvals to the native UI keeps
+// the blast radius to a single tool and avoids mis-routing approvals.
+function ownedDefinitions(configDir) {
+  const command = hookCommand(configDir);
   return {
     PreToolUse: {
-      matcher: questionMatcher,
-      hooks: [{ type: 'command', command, timeout: 3600 }],
-    },
-    PermissionRequest: {
-      matcher: '*',
+      matcher: 'AskUserQuestion',
       hooks: [{ type: 'command', command, timeout: 3600 }],
     },
   };
@@ -290,6 +288,9 @@ if (typeof root !== 'string' || root.length === 0) {
   process.stderr.write('${PLUGIN_ID} is not installed or linked\\n');
   process.exit(1);
 }
+// Fail open when disabled: a disabled plugin cannot open its popup (spike P3),
+// so the hook must not block — exit 0 and let the native picker take over.
+if (plugin.enabled === false) process.exit(0);
 const child = spawnSync(process.execPath, [join(root, 'bin', 'hook.mjs'), ...process.argv.slice(2)], {
   stdio: 'inherit',
   env: process.env,
@@ -306,9 +307,6 @@ function resolveOptions(options = {}) {
   }
   if (typeof options.claudePath !== 'string' || options.claudePath.length === 0) {
     throw new Error('claudePath is required');
-  }
-  if (typeof options.codexPath !== 'string' || options.codexPath.length === 0) {
-    throw new Error('codexPath is required');
   }
   if (options.onBackup !== undefined && typeof options.onBackup !== 'function') {
     throw new Error('onBackup must be a function');
@@ -332,11 +330,9 @@ export async function resolveCliOptions({ env = process.env, execFile = execFile
   if (!configDir) throw new Error('herdr plugin config directory could not be resolved');
   const userHome = env.HOME || homedir();
   const claudeHome = env.CLAUDE_CONFIG_DIR || join(userHome, '.claude');
-  const codexHome = env.CODEX_HOME || join(userHome, '.codex');
   return {
     configDir,
     claudePath: join(claudeHome, 'settings.json'),
-    codexPath: join(codexHome, 'hooks.json'),
   };
 }
 
@@ -396,9 +392,8 @@ async function configStatus(path, definitions) {
 export async function hookStatus(rawOptions) {
   const options = resolveOptions(rawOptions);
   const launcherPath = join(options.configDir, 'hook-launcher.mjs');
-  const [claude, codex, launcherSnapshot] = await Promise.all([
-    configStatus(options.claudePath, ownedDefinitions(options.configDir, 'claude')),
-    configStatus(options.codexPath, ownedDefinitions(options.configDir, 'codex')),
+  const [claude, launcherSnapshot] = await Promise.all([
+    configStatus(options.claudePath, ownedDefinitions(options.configDir)),
     snapshotFile(launcherPath),
   ]);
   let launcherStatus = 'missing';
@@ -408,7 +403,6 @@ export async function hookStatus(rawOptions) {
   }
   return {
     claude,
-    codex,
     launcher: { path: launcherPath, status: launcherStatus },
     trust_review_required: true,
   };
@@ -445,11 +439,10 @@ export async function uninstallHooks(rawOptions) {
   const options = resolveOptions(rawOptions);
   const launcherPath = join(options.configDir, 'hook-launcher.mjs');
   const definitionsByAgent = {
-    claude: ownedDefinitions(options.configDir, 'claude'),
-    codex: ownedDefinitions(options.configDir, 'codex'),
+    claude: ownedDefinitions(options.configDir),
   };
   const prepared = [];
-  for (const [name, path] of [['claude', options.claudePath], ['codex', options.codexPath]]) {
+  for (const [name, path] of [['claude', options.claudePath]]) {
     const snapshot = await snapshotFile(path);
     if (!snapshot.exists) {
       prepared.push({ name, path, snapshot, removed: 0, changed: 0, nextBytes: null });
@@ -530,7 +523,6 @@ export async function uninstallHooks(rawOptions) {
     }
     return {
       claude: results[0],
-      codex: results[1],
       launcher: { path: launcherPath, status: launcherStatus },
       trust_review_required: true,
     };
@@ -554,8 +546,7 @@ export async function installHooks(rawOptions) {
   const options = resolveOptions(rawOptions);
   const launcherPath = join(options.configDir, 'hook-launcher.mjs');
   const artifacts = [
-    { name: 'claude', path: options.claudePath, definitions: ownedDefinitions(options.configDir, 'claude') },
-    { name: 'codex', path: options.codexPath, definitions: ownedDefinitions(options.configDir, 'codex') },
+    { name: 'claude', path: options.claudePath, definitions: ownedDefinitions(options.configDir) },
   ];
   const launcher = Buffer.from(launcherSource());
   const prepared = [];
@@ -661,7 +652,6 @@ export async function installHooks(rawOptions) {
     if (!(await readFile(launcherPath)).equals(launcher)) throw new Error('launcher readback mismatch');
     return {
       claude: results[0],
-      codex: results[1],
       launcher: { path: launcherPath, changed: launcherChanged },
       trust_review_required: true,
     };

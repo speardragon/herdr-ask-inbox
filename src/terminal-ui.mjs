@@ -1,10 +1,8 @@
-import { createHash } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
-
 import * as claude from './adapters/claude.mjs';
-import * as codex from './adapters/codex.mjs';
 import { normalizeRequest } from './schema.mjs';
-import { handoff as handoffToAgent } from './router.mjs';
+
+// v2 popup UI: Claude AskUserQuestion only. Answers deliver losslessly through the
+// hook response; "go to agent" hands the request back to the native picker.
 
 const FOOTER = 'Enter answer · g go to agent · Esc native handoff';
 const MAX_TERMINAL_WIDTH = 240;
@@ -19,108 +17,34 @@ function cloneSet(value) {
   return value instanceof Set ? new Set(value) : new Set();
 }
 
-function suggestionDigest(value) {
-  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
-// This is deliberately a digest of the structured operation, rather than of
-// the rendered string.  A resize can change line wrapping without changing
-// what is being approved, while any operation change must invalidate the
-// confirmation produced by a previous layout.
-export function permissionDetailDigest(request) {
-  return createHash('sha256').update(JSON.stringify({
-    tool_name: request.permission?.tool_name,
-    tool_input: request.permission?.tool_input,
-  })).digest('hex');
-}
-
-function permissionOptions(request) {
-  const options = [{
-    type: 'allow-once',
-    label: 'Allow once',
-    description: 'Allow only this request.',
-  }];
-  if (request.source.agent === 'claude' && Array.isArray(request.permission?.suggestions)) {
-    for (const [index, suggestion] of request.permission.suggestions.entries()) {
-      options.push({
-        type: 'persistent',
-        index,
-        label: `Persist upstream suggestion ${index + 1}`,
-        description: `Exact scope: ${JSON.stringify(suggestion)}`,
-        scope_digest: suggestionDigest(suggestion),
-      });
-    }
-  }
-  options.push({
-    type: 'deny',
-    label: 'Deny',
-    description: 'Reject this request.',
-  }, HANDOFF_OPTION);
-  return options;
-}
-
-function questionOptions(request, question) {
+function questionOptions(question) {
   const options = question.options.map((option, index) => ({
     type: 'answer-option',
     index,
     label: option.label,
     description: option.description,
   }));
-  if (request.source.agent === 'claude') {
-    options.push({
-      type: 'custom',
-      label: 'Custom answer…',
-      description: 'Type a free-text answer.',
-    });
-  }
+  options.push({
+    type: 'custom',
+    label: 'Custom answer…',
+    description: 'Type a free-text answer.',
+  });
   return options;
 }
 
 function optionsFor(state) {
   if (state.unsupported) return state.options;
-  if (state.kind === 'permission') return state.options;
   return state.questionOptions[state.questionIndex] ?? [];
 }
 
-function nonEmptyString(value) {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
 function supportedRequest(request) {
-  if (!['claude', 'codex'].includes(request.source.agent)) return false;
-  if (request.kind === 'permission') {
-    return request.transport === 'hook-response'
-      && nonEmptyString(request.permission?.tool_name)
-      && request.permission?.tool_input !== null
-      && typeof request.permission?.tool_input === 'object'
-      && (
-        request.source.agent !== 'claude'
-        || Array.isArray(request.permission?.suggestions)
-      );
-  }
-  if (
-    request.kind !== 'question'
-    || !Array.isArray(request.questions)
-    || request.questions.length === 0
-    || (request.source.agent === 'claude' && request.transport !== 'hook-response')
-    || (request.source.agent === 'codex' && request.transport !== 'terminal-keys')
-  ) {
-    return false;
-  }
-  if (request.source.agent === 'codex') {
-    const question = request.questions[0];
-    const signature = request.detail?.screen_signature;
-    if (
-      request.questions.length !== 1
-      || request.detail?.agent_version !== '0.101.0'
-      || request.detail?.screen_profile !== 'codex-request-user-input-v1'
-      || signature?.question_id !== question?.id
-      || signature?.question !== question?.question
-      || !isDeepStrictEqual(signature?.options, question?.options)
-    ) {
-      return false;
-    }
-  }
+  if (request.source.agent !== 'claude') return false;
+  if (request.kind !== 'question' || request.transport !== 'hook-response') return false;
+  if (!Array.isArray(request.questions) || request.questions.length === 0) return false;
   return request.questions.every((question) => (
     nonEmptyString(question?.question)
     && nonEmptyString(question?.header)
@@ -129,8 +53,7 @@ function supportedRequest(request) {
     && question.options.every((option) => (
       nonEmptyString(option?.label) && nonEmptyString(option?.description)
     ))
-    && (request.source.agent !== 'claude' || typeof question.multiSelect === 'boolean')
-    && (request.source.agent !== 'codex' || nonEmptyString(question.id))
+    && typeof question.multiSelect === 'boolean'
   ));
 }
 
@@ -159,23 +82,12 @@ export function createViewModel(requestValue, queuePosition = {}) {
     layout: null,
   };
   if (!supportedRequest(request)) {
-    return {
-      ...common,
-      unsupported: true,
-      options: [{ ...HANDOFF_OPTION }],
-    };
-  }
-  if (request.kind === 'permission') {
-    return {
-      ...common,
-      options: permissionOptions(request),
-      permission: structuredClone(request.permission),
-    };
+    return { ...common, unsupported: true, options: [{ ...HANDOFF_OPTION }] };
   }
   return {
     ...common,
-    questions: structuredClone(request.questions ?? []),
-    questionOptions: (request.questions ?? []).map((question) => questionOptions(request, question)),
+    questions: structuredClone(request.questions),
+    questionOptions: request.questions.map((question) => questionOptions(question)),
     questionIndex: 0,
   };
 }
@@ -192,10 +104,7 @@ function handoffEffect(state, reason) {
     ...state,
     effect: {
       type: 'handoff',
-      selection: {
-        type: 'handoff',
-        ...(reason ? { reason } : {}),
-      },
+      selection: { type: 'handoff', ...(reason ? { reason } : {}) },
     },
   };
 }
@@ -216,16 +125,10 @@ function answerQuestion(state, answer) {
       layout: null,
     };
   }
-  const value = state.transport === 'terminal-keys'
-    ? answer
-    : { answers };
   return {
     ...state,
     answers,
-    effect: {
-      type: 'deliver',
-      selection: { type: 'answer', value },
-    },
+    effect: { type: 'deliver', selection: { type: 'answer', value: { answers } } },
   };
 }
 
@@ -234,38 +137,6 @@ function confirm(state) {
   const option = options[state.cursor];
   if (!option) return { ...state, effect: null };
   if (option.type === 'handoff') return handoffEffect(state);
-  if (state.kind === 'permission') {
-    if (option.type === 'allow-once' || option.type === 'persistent') {
-      if (option.type === 'persistent' && state.layout?.persistent_scope_fully_visible !== true) {
-        return handoffEffect(state, 'persistent scope was not fully visible');
-      }
-      const permissionDetailVisible = state.layout?.request_id === state.request_id
-        && state.layout?.cursor === state.cursor
-        && state.layout?.visible_option_indices?.includes(state.cursor)
-        && state.layout?.permission_detail_fully_visible === true
-        && state.layout?.permission_detail_digest === permissionDetailDigest(state.request);
-      if (!permissionDetailVisible) {
-        return handoffEffect(state, 'permission detail was not fully visible');
-      }
-    }
-    return {
-      ...state,
-      effect: {
-        type: 'deliver',
-        selection: option.type === 'persistent'
-          ? {
-            type: 'persistent',
-            index: option.index,
-            scope_digest: option.scope_digest,
-            permission_detail_digest: permissionDetailDigest(state.request),
-          }
-          : {
-            type: option.type,
-            permission_detail_digest: permissionDetailDigest(state.request),
-          },
-      },
-    };
-  }
   const question = state.questions[state.questionIndex];
   if (state.editing) {
     if (state.customText.length === 0) return { ...state, effect: null };
@@ -337,8 +208,6 @@ export function reduceKey(state, key) {
       else selected.add(option.index);
       return { ...targeted, selected };
     }
-    const option = optionsFor(targeted)[cursor];
-    if (option?.type === 'persistent') return targeted;
     return confirm(targeted);
   }
   if (key === 'enter') return confirm(state);
@@ -347,11 +216,7 @@ export function reduceKey(state, key) {
 
 function visibleCodePoint(value) {
   const code = value.codePointAt(0);
-  if (
-    code <= 0x1f
-    || (code >= 0x7f && code <= 0x9f)
-    || /\p{Cf}/u.test(value)
-  ) {
+  if (code <= 0x1f || (code >= 0x7f && code <= 0x9f) || /\p{Cf}/u.test(value)) {
     return `<U+${code.toString(16).toUpperCase().padStart(4, '0')}>`;
   }
   return value;
@@ -502,15 +367,12 @@ export function layoutViewModel(viewModel, size = {}) {
     clipLine(`Pane ${viewModel.source.pane_id} · cwd ${viewModel.source.cwd ?? '(unknown)'}`, width),
     clipLine(`Type ${viewModel.kind} · ${viewModel.title ?? ''}`, width),
   ];
-  const toolDetailLines = [];
-  if (viewModel.kind === 'permission') {
-    append(toolDetailLines, `Tool: ${viewModel.permission?.tool_name ?? '(unknown)'}`, width);
-    append(toolDetailLines, `Input: ${JSON.stringify(viewModel.permission?.tool_input ?? null)}`, width);
-  } else if (!viewModel.unsupported) {
+  const detailLines = [];
+  if (!viewModel.unsupported) {
     const question = viewModel.questions[viewModel.questionIndex];
-    append(toolDetailLines, `${question?.header ?? 'Question'}: ${question?.question ?? ''}`, width);
+    append(detailLines, `${question?.header ?? 'Question'}: ${question?.question ?? ''}`, width);
   } else {
-    append(toolDetailLines, 'Unsupported request contract; use Go to agent.', width);
+    append(detailLines, 'Unsupported request contract; use Go to agent.', width);
   }
 
   const footerLines = wrap(FOOTER, width);
@@ -526,27 +388,14 @@ export function layoutViewModel(viewModel, size = {}) {
   const keptHeaders = headerLines.slice(0, Math.min(headerLines.length, remaining));
   const contentBudget = Math.max(0, remaining - keptHeaders.length);
   const currentOption = optionsFor(viewModel)[viewModel.cursor];
-  const currentDescriptionLines = currentOption
-    ? wrap(currentOption.description, width)
-    : [];
-  const persistent = currentOption?.type === 'persistent';
-  const persistentScopeFullyVisible = persistent
-    && currentDescriptionLines.length > 0
-    && currentDescriptionLines.length <= contentBudget;
-  const descriptionBudget = persistent
-    ? Math.min(currentDescriptionLines.length, contentBudget)
-    : Math.min(currentDescriptionLines.length, Math.min(4, contentBudget));
-  const visibleDescription = persistent && !persistentScopeFullyVisible
-    ? truncatedSection(currentDescriptionLines, descriptionBudget, width)
-    : currentDescriptionLines.slice(0, descriptionBudget);
-  const toolBudget = Math.max(0, contentBudget - visibleDescription.length);
-  const visibleToolDetails = truncatedSection(toolDetailLines, toolBudget, width);
-  const permissionDetailFullyVisible = viewModel.kind === 'permission'
-    && toolDetailLines.length > 0
-    && toolDetailLines.length <= toolBudget;
+  const currentDescriptionLines = currentOption ? wrap(currentOption.description, width) : [];
+  const descriptionBudget = Math.min(currentDescriptionLines.length, Math.min(4, contentBudget));
+  const visibleDescription = currentDescriptionLines.slice(0, descriptionBudget);
+  const detailBudget = Math.max(0, contentBudget - visibleDescription.length);
+  const visibleDetail = truncatedSection(detailLines, detailBudget, width);
   const lines = [
     ...keptHeaders,
-    ...visibleToolDetails,
+    ...visibleDetail,
     ...visibleDescription,
     ...viewport.rows,
     ...footerLines,
@@ -559,11 +408,6 @@ export function layoutViewModel(viewModel, size = {}) {
       width,
       height,
       visible_option_indices: viewport.visibleOptionIndices,
-      persistent_scope_fully_visible: persistentScopeFullyVisible,
-      permission_detail_fully_visible: permissionDetailFullyVisible,
-      permission_detail_digest: viewModel.kind === 'permission'
-        ? permissionDetailDigest(viewModel.request)
-        : null,
       lines,
     },
   };
@@ -573,69 +417,30 @@ export function render(viewModel, size = {}) {
   return layoutViewModel(viewModel, size).layout.lines.join('\n');
 }
 
-function responseFor(request, selection, now) {
-  if (selection.type === 'deny') {
-    return {
-      schema_version: 1,
-      request_id: request.request_id,
-      action: 'deny',
-      value: selection.message ? { message: selection.message } : {},
-      created_at_ms: now,
-    };
-  }
-  if (selection.type === 'allow-once') {
-    return {
-      schema_version: 1,
-      request_id: request.request_id,
-      action: 'answer',
-      value: { permission: null },
-      created_at_ms: now,
-    };
-  }
-  if (selection.type === 'persistent') {
-    const suggestion = request.permission?.suggestions?.[selection.index];
-    if (
-      request.source.agent !== 'claude'
-      || suggestion === undefined
-      || selection.scope_digest !== suggestionDigest(suggestion)
-    ) {
-      return null;
-    }
-    return {
-      schema_version: 1,
-      request_id: request.request_id,
-      action: 'answer',
-      value: { permission: structuredClone(suggestion) },
-      created_at_ms: now,
-    };
-  }
-  if (selection.type === 'answer') {
-    return {
-      schema_version: 1,
-      request_id: request.request_id,
-      action: 'answer',
-      value: selection.value,
-      created_at_ms: now,
-    };
-  }
-  throw new Error('unsupported popup selection');
-}
-
-function sessionIdOf(agent) {
-  const session = agent?.agent_session;
-  if (typeof session === 'string') return session;
-  return typeof session?.value === 'string' ? session.value : null;
-}
-
-async function notifyHandoff(herdr, request, reason) {
+async function focusBestEffort(herdr, paneId) {
   try {
-    await herdr.notify(
-      'Herdr Question needs the native UI',
-      `Request ${request.request_id} was not changed (${reason}).`,
-    );
+    await herdr.focusAgent(paneId);
+    return true;
   } catch {
-    // Notification is advisory. Handoff and source focus remain authoritative.
+    return false;
   }
+}
+
+async function handoffToNative(request, { queue, herdr, now }) {
+  try {
+    await queue.respond({
+      schema_version: 1,
+      request_id: request.request_id,
+      action: 'handoff',
+      value: null,
+      created_at_ms: now(),
+    });
+  } catch {
+    // The hook may already have failed open and consumed the request; focusing
+    // the source pane still returns the user to the native picker.
+  }
+  const focused = await focusBestEffort(herdr, request.source.pane_id);
+  return { status: 'handed-off', focused };
 }
 
 export async function deliverSelection(requestValue, selection, deps) {
@@ -644,69 +449,28 @@ export async function deliverSelection(requestValue, selection, deps) {
   const queue = deps?.queue;
   const herdr = deps?.herdr;
   const now = typeof deps?.now === 'function' ? deps.now : Date.now;
-  const doHandoff = deps?.handoff ?? handoffToAgent;
   if (!queue || typeof queue.respond !== 'function') throw new TypeError('delivery queue is required');
   if (!herdr || typeof herdr.focusAgent !== 'function') throw new TypeError('herdr API is required');
 
-  const nativeHandoff = async (reason = 'native handoff') => {
-    const result = await doHandoff(request, { queue, herdr });
-    if (reason !== 'native handoff') await notifyHandoff(herdr, request, reason);
-    return { status: 'handed-off', reason, ...result };
-  };
-
   if (selection.type === 'handoff') {
-    return nativeHandoff(
-      typeof selection.reason === 'string' && selection.reason.length > 0
-        ? selection.reason
-        : 'native handoff',
-    );
+    return handoffToNative(request, { queue, herdr, now });
   }
-  if (
-    request.kind === 'permission'
-    && ['allow-once', 'persistent'].includes(selection.type)
-    && selection.permission_detail_digest !== permissionDetailDigest(request)
-  ) {
-    return nativeHandoff('permission detail was not fully visible');
-  }
-  if (request.transport === 'terminal-keys') {
-    if (selection.type !== 'answer') return nativeHandoff('unsupported terminal selection');
-    let snapshot;
-    let screen;
-    try {
-      snapshot = await herdr.snapshot();
-      const live = snapshot.agents.find((agent) => (
-        agent?.pane_id === request.source.pane_id
-        && agent?.workspace_id === request.source.workspace_id
-        && agent?.agent === request.source.agent
-        && sessionIdOf(agent) === request.source.session_id
-        && agent?.agent_status === 'blocked'
-      ));
-      if (!live) return nativeHandoff('source pane or session changed');
-      screen = await herdr.readPane(request.source.pane_id);
-    } catch {
-      return nativeHandoff('source validation failed');
-    }
-    const plan = codex.planQuestionKeys(request, selection.value, screen);
-    if (!plan.ok || plan.keys.length === 0) return nativeHandoff(plan.reason ?? 'screen mismatch');
-    try {
-      await herdr.sendAgentKeys(request.source.pane_id, plan.keys);
-    } catch {
-      return nativeHandoff('key delivery failed');
-    }
-    await queue.cancel(request.request_id);
-    await queue.takeResponse(request.request_id);
-    return { status: 'answered', keys: [...plan.keys] };
-  }
+  if (selection.type !== 'answer') return handoffToNative(request, { queue, herdr, now });
 
-  const response = responseFor(request, selection, now());
-  if (!response) return nativeHandoff('persistent choice requires native support');
-  if (request.source.agent === 'claude') claude.encodeResponse(request, response);
-  else if (request.source.agent === 'codex') {
-    const encoded = codex.encodeResponse(request, response);
-    if (encoded === null) return nativeHandoff('persistent choice requires native support');
-  } else {
-    return nativeHandoff('unsupported agent');
+  const response = {
+    schema_version: 1,
+    request_id: request.request_id,
+    action: 'answer',
+    value: selection.value,
+    created_at_ms: now(),
+  };
+  // Validate the answer is deliverable before publishing; on any mismatch fall
+  // back to the native picker rather than delivering something malformed.
+  try {
+    claude.encodeResponse(request, response);
+  } catch {
+    return handoffToNative(request, { queue, herdr, now });
   }
   await queue.respond(response);
-  return { status: response.action === 'deny' ? 'denied' : 'answered' };
+  return { status: 'answered' };
 }

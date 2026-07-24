@@ -53,7 +53,7 @@ async function openingLease(queue, token = TOKEN) {
     token,
     state: 'opening',
     owner_pid: process.pid,
-    updated_at_ms: Date.now(),
+    heartbeat_ms: Date.now(),
   })}\n`, { mode: 0o600 });
 }
 

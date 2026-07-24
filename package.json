@@ -7,7 +7,6 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test",
-    "smoke": "node bin/smoke.mjs"
+    "test": "node --test"
   }
 }

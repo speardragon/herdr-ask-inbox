@@ -1,154 +1,71 @@
 #!/usr/bin/env node
 
-import { execFile as execFileCallback } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
-import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import * as claude from '../src/adapters/claude.mjs';
-import * as codex from '../src/adapters/codex.mjs';
+import { createHerdr } from '../src/herdr.mjs';
 import { openQueue } from '../src/queue.mjs';
+import { ensurePopup, waitForOutcome } from '../src/opener.mjs';
 
-const ADAPTERS = { claude, codex };
-const execFileAsync = promisify(execFileCallback);
-const LIFECYCLE_SOURCE = 'ray.herdr-question';
 const MAX_STDIN_BYTES = 1_048_576;
 const MAX_JSON_DEPTH = 64;
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000;
 
-export function createHerdrLifecycle({ bin = 'herdr', execFile = execFileAsync } = {}) {
-  const run = (args) => execFile(bin, args, { timeout: 5_000, maxBuffer: 1_048_576 });
-  return {
-    reportBlocked(request) {
-      return run([
-        'pane', 'report-agent', request.source.pane_id,
-        '--source', LIFECYCLE_SOURCE,
-        '--agent', request.source.agent,
-        '--state', 'blocked',
-        '--agent-session-id', request.source.session_id,
-      ]);
-    },
-    releaseBlocked(request) {
-      return run([
-        'pane', 'release-agent', request.source.pane_id,
-        '--source', LIFECYCLE_SOURCE,
-        '--agent', request.source.agent,
-      ]);
-    },
-    openPopup() {
-      return run([
-        'plugin', 'pane', 'open',
-        '--plugin', LIFECYCLE_SOURCE,
-        '--entrypoint', 'question',
-        '--focus',
-      ]);
-    },
-  };
-}
-
-const delay = (milliseconds, signal) => new Promise((resolve) => {
-  if (signal?.aborted) {
-    resolve();
-    return;
-  }
-  const timer = setTimeout(finish, milliseconds);
-  function finish() {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', finish);
-    resolve();
-  }
-  signal?.addEventListener('abort', finish, { once: true });
-});
-
-async function waitForResponse(queue, requestId, { timeoutMs, signal }) {
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    if (signal?.aborted) return { interrupted: true, response: null };
-    const response = await queue.takeResponse(requestId);
-    if (response) return { interrupted: false, response };
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return { interrupted: false, response: null };
-    await delay(Math.min(25, remaining), signal);
-  }
-}
-
-async function cancelAndConsume(queue, requestId) {
-  await queue.cancel(requestId).catch(() => false);
-  await queue.takeResponse(requestId).catch(() => null);
-}
-
+// v2: the hook opens the popup itself and treats popup liveness as the only gate.
+// It never depends on a herdr blocked-status event (which never fires while screen
+// detection sees the agent as "working" — the v1 deadlock). If no popup is alive,
+// the hook returns no decision and Claude falls back to its native picker.
 export async function runHook({
-  agent,
   payload,
   env,
   queue,
-  reportBlocked,
-  releaseBlocked,
-  openPopup,
+  herdr,
   signal,
-  timeoutMs = 3_600_000,
+  now = Date.now,
+  isAlive,
+  deadlineMs,
 }) {
-  const adapter = ADAPTERS[agent];
-  if (!adapter) throw new Error('unsupported hook agent');
   if (!queue || typeof queue.enqueue !== 'function') throw new Error('hook queue is required');
-  if (typeof reportBlocked !== 'function') throw new Error('reportBlocked is required');
-  if (typeof releaseBlocked !== 'function') throw new Error('releaseBlocked is required');
-  if (typeof openPopup !== 'function') throw new Error('openPopup is required');
+  if (!herdr || typeof herdr.openPopup !== 'function') throw new Error('herdr API is required');
 
-  const request = adapter.normalizeHook(payload, env);
+  const request = claude.normalizeHook(payload, env);
   const enqueued = await queue.enqueue(request);
   if (!enqueued || enqueued.detail?.invocation_nonce !== request.detail?.invocation_nonce) {
-    return { status: 'duplicate', request, response: null, output: null };
-  }
-  if (request.transport === 'terminal-keys') {
-    return { status: 'armed', request, response: null, output: null };
+    // Another hook process already owns this exact invocation; let it drive.
+    return { status: 'duplicate', request, output: null };
   }
 
-  let lifecycleAttempted = false;
+  const options = { now, isAlive };
   try {
-    lifecycleAttempted = true;
-    try {
-      await reportBlocked(request);
-    } catch {
-      try {
-        await openPopup(request);
-      } catch {
-        await cancelAndConsume(queue, request.request_id);
-        return { status: 'report_failed', request, response: null, output: null };
-      }
+    // Best-effort sidebar marker. Never gates: report failure must not block.
+    await herdr.reportBlocked?.(request).catch(() => {});
+    await ensurePopup(queue, herdr, options);
+    const outcome = await waitForOutcome(queue, request, {
+      ...options,
+      signal,
+      deadlineMs: Number.isFinite(deadlineMs) ? deadlineMs : now() + DEFAULT_TIMEOUT_MS,
+    });
+    if (outcome.status === 'answer') {
+      const output = claude.encodeResponse(request, outcome.response);
+      return { status: output === null ? 'handoff' : 'answered', request, output };
     }
-
-    const waited = await waitForResponse(queue, request.request_id, { timeoutMs, signal });
-    if (waited.interrupted) {
-      await cancelAndConsume(queue, request.request_id);
-      return { status: 'interrupted', request, response: null, output: null };
-    }
-    if (!waited.response) {
-      await cancelAndConsume(queue, request.request_id);
-      return { status: 'timeout', request, response: null, output: null };
-    }
-    if (waited.response.action === 'handoff') {
-      return { status: 'handoff', request, response: waited.response, output: null };
-    }
-    const output = adapter.encodeResponse(request, waited.response);
-    return {
-      status: output === null ? 'handoff' : 'answered',
-      request,
-      response: waited.response,
-      output,
-    };
+    return { status: outcome.status, request, output: null };
   } catch {
-    await cancelAndConsume(queue, request.request_id);
-    return { status: 'error', request, response: null, output: null };
+    await queue.cancel(request.request_id).catch(() => {});
+    await queue.takeResponse(request.request_id).catch(() => {});
+    return { status: 'error', request, output: null };
   } finally {
-    if (lifecycleAttempted) await releaseBlocked(request).catch(() => {});
+    await herdr.releaseBlocked?.(request).catch(() => {});
   }
 }
 
 function parseArguments(argv, env) {
   const options = {
+    agent: undefined,
     queueRoot: env.HERDR_QUESTION_QUEUE_DIR,
     timeoutMs: env.HERDR_QUESTION_HOOK_TIMEOUT_MS === undefined
-      ? 3_600_000
+      ? DEFAULT_TIMEOUT_MS
       : Number(env.HERDR_QUESTION_HOOK_TIMEOUT_MS),
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -158,7 +75,7 @@ function parseArguments(argv, env) {
     else if (value === '--timeout-ms') options.timeoutMs = Number(argv[++index]);
     else throw new Error('unsupported hook argument');
   }
-  if (!ADAPTERS[options.agent]) throw new Error('unsupported hook agent');
+  if (options.agent !== 'claude') throw new Error('unsupported hook agent');
   if (typeof options.queueRoot !== 'string' || options.queueRoot.length === 0) {
     throw new Error('hook queue root is required');
   }
@@ -202,19 +119,18 @@ async function main() {
     const options = parseArguments(process.argv.slice(2), process.env);
     const payload = await readStandardInput(process.stdin);
     const queue = await openQueue(options.queueRoot);
-    const lifecycle = createHerdrLifecycle({ bin: process.env.HERDR_BIN_PATH || 'herdr' });
+    const herdr = createHerdr({ bin: process.env.HERDR_BIN_PATH || 'herdr', env: process.env });
     const controller = new AbortController();
     const abort = () => controller.abort();
     process.once('SIGINT', abort);
     process.once('SIGTERM', abort);
     const result = await runHook({
-      agent: options.agent,
       payload,
       env: process.env,
       queue,
-      ...lifecycle,
+      herdr,
       signal: controller.signal,
-      timeoutMs: options.timeoutMs,
+      deadlineMs: Date.now() + options.timeoutMs,
     }).finally(() => {
       process.removeListener('SIGINT', abort);
       process.removeListener('SIGTERM', abort);

@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
 
 import { normalizeRequest, requestId, validateResponse } from '../schema.mjs';
 
@@ -62,10 +61,9 @@ function questionsFrom(payload) {
   return projected;
 }
 
+// v2 scope: Claude AskUserQuestion only. PermissionRequest is not hooked.
 export function normalizeHook(payload, env = process.env) {
-  const isQuestion = payload?.hook_event_name === 'PreToolUse' && payload?.tool_name === 'AskUserQuestion';
-  const isPermission = payload?.hook_event_name === 'PermissionRequest';
-  if (!isQuestion && !isPermission) {
+  if (payload?.hook_event_name !== 'PreToolUse' || payload?.tool_name !== 'AskUserQuestion') {
     throw new Error('unsupported Claude hook payload');
   }
 
@@ -74,18 +72,7 @@ export function normalizeHook(payload, env = process.env) {
   const upstreamInvocationId = typeof payload.tool_use_id === 'string' && payload.tool_use_id.trim().length > 0
     ? payload.tool_use_id
     : null;
-  const questions = isQuestion ? questionsFrom(payload) : null;
-  const permission = isPermission ? {
-    tool_name: requireNonEmptyString(payload.tool_name, 'tool_name'),
-    tool_input: structuredClone(payload.tool_input),
-    suggestions: structuredClone(payload.permission_suggestions ?? []),
-  } : null;
-  if (isPermission && (payload.tool_input === null || typeof payload.tool_input !== 'object')) {
-    throw new Error('tool_input must be structured data');
-  }
-  if (isPermission && !Array.isArray(payload.permission_suggestions ?? [])) {
-    throw new Error('permission_suggestions must be an array');
-  }
+  const questions = questionsFrom(payload);
   const id = requestId({
     agent: 'claude',
     paneId: source.pane_id,
@@ -95,7 +82,6 @@ export function normalizeHook(payload, env = process.env) {
     event: payload.hook_event_name,
     toolName: payload.tool_name,
     input: payload.tool_input,
-    permissionSuggestions: payload.permission_suggestions ?? [],
   });
 
   const detail = {
@@ -115,12 +101,11 @@ export function normalizeHook(payload, env = process.env) {
     request_id: id,
     created_at_ms: Date.now(),
     source,
-    kind: isQuestion ? 'question' : 'permission',
+    kind: 'question',
     transport: 'hook-response',
-    title: isQuestion ? questions[0].header : `Approve ${payload.tool_name}`,
+    title: questions[0].header,
     detail,
     questions,
-    permission,
     status: 'waiting',
   });
 }
@@ -130,51 +115,6 @@ export function encodeResponse(requestValue, responseValue) {
   const response = validateResponse(responseValue, request.request_id);
   if (request.source.agent !== 'claude') throw new Error('request is not for Claude');
   if (response.action === 'handoff') return null;
-  if (request.kind === 'permission' && request.transport === 'hook-response') {
-    if (response.action === 'deny') {
-      const decision = { behavior: 'deny' };
-      if (typeof response.value?.message === 'string' && response.value.message.length > 0) {
-        decision.message = response.value.message;
-      }
-      return {
-        hookSpecificOutput: {
-          hookEventName: 'PermissionRequest',
-          decision,
-        },
-      };
-    }
-    if (response.action !== 'answer') throw new Error('Claude permission requires an answer');
-    const hasPermission = Object.hasOwn(response.value ?? {}, 'permission');
-    const hasSuggestionIndex = Object.hasOwn(response.value ?? {}, 'suggestion_index');
-    if (hasPermission && hasSuggestionIndex) {
-      throw new Error('ambiguous permission selection');
-    }
-    if (response.value?.permission === null) {
-      return {
-        hookSpecificOutput: {
-          hookEventName: 'PermissionRequest',
-          decision: { behavior: 'allow' },
-        },
-      };
-    }
-    const suggestionIndex = response.value?.suggestion_index;
-    const selected = Number.isSafeInteger(suggestionIndex)
-      ? request.permission.suggestions[suggestionIndex]
-      : request.permission.suggestions.find((suggestion) => (
-        isDeepStrictEqual(suggestion, response.value?.permission)
-      ));
-    if (!selected) throw new Error('response must select an exact upstream permission suggestion');
-
-    return {
-      hookSpecificOutput: {
-        hookEventName: 'PermissionRequest',
-        decision: {
-          behavior: 'allow',
-          updatedPermissions: [structuredClone(selected)],
-        },
-      },
-    };
-  }
   if (request.kind !== 'question' || request.transport !== 'hook-response') {
     throw new Error('unsupported Claude response request');
   }

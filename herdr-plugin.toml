@@ -22,10 +22,6 @@ width = 82
 height = 26
 command = ["node", "bin/popup.mjs"]
 
-[[events]]
-on = "pane.agent_status_changed"
-command = ["node", "bin/event.mjs"]
-
 [[actions]]
 id = "open"
 title = "Herdr Question: Open pending queue"

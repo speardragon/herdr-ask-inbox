@@ -169,6 +169,8 @@ export function createHerdr({
       if (typeof token !== 'string' || !POPUP_TOKEN_PATTERN.test(token)) {
         throw new TypeError('popup token must be a UUID v4');
       }
+      // `plugin pane open` returns as soon as the popup is spawned (spike P1),
+      // so a normal bounded timeout is safe — the hook must never hang on it.
       const { stdout } = await run('openPopup', [
         'plugin', 'pane', 'open',
         '--plugin', PLUGIN_ID,
@@ -176,7 +178,7 @@ export function createHerdr({
         '--placement', 'popup',
         '--focus',
         '--env', `HERDR_QUESTION_POPUP_TOKEN=${token}`,
-      ], { noTimeout: true });
+      ]);
       return popupModalResultFrom(parseJsonObject(stdout, 'openPopup'));
     },
 
