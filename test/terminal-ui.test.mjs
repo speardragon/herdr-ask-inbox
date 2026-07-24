@@ -126,14 +126,26 @@ test('multi-question flow advances then delivers all answers', () => {
   assert.deepEqual(state.effect.selection.value, { answers: { 'Q1?': 'A', 'Q2?': 'D' } });
 });
 
-test('render shows provenance, the question, choices, and the fixed footer', () => {
-  const view = createViewModel(req());
+test('render shows the queue position, the question, choices, and the fixed footer', () => {
+  const view = createViewModel(req(), { index: 2, total: 3 });
   const out = render(view, SIZE);
-  assert.match(out, /Agent claude · Workspace w1/);
-  assert.match(out, /Pane w1:p1/);
+  assert.match(out, /Herdr Question · 2\/3/);
   assert.match(out, /Which framework\?/);
   assert.match(out, /React/);
   assert.match(out, /go to agent/);
+  // workspace/pane/type are no longer shown — keep the popup focused on the ask
+  assert.doesNotMatch(out, /Workspace/);
+  assert.doesNotMatch(out, /Pane /);
+});
+
+test('render indents the current option description and separates choices with a blank line', () => {
+  const view = createViewModel(req());
+  const out = render(view, SIZE);
+  const lines = out.split('\n');
+  const descriptionLine = lines.find((line) => line.includes('A UI library'));
+  assert.match(descriptionLine, /^ {2}A UI library/);
+  const choiceIndex = lines.findIndex((line) => line.includes('1. React'));
+  assert.equal(lines[choiceIndex - 1], '');
 });
 
 test('render clamps dimensions and neutralizes control characters', () => {

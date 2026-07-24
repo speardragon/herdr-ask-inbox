@@ -382,9 +382,6 @@ export function layoutViewModel(viewModel, size = {}) {
   const color = size?.color === true;
   const headerLines = [
     clipLine(`Herdr Question · ${viewModel.queuePosition.index}/${viewModel.queuePosition.total}`, width),
-    clipLine(`Agent ${viewModel.source.agent} · Workspace ${viewModel.source.workspace_id}`, width),
-    clipLine(`Pane ${viewModel.source.pane_id} · cwd ${viewModel.source.cwd ?? '(unknown)'}`, width),
-    clipLine(`Type ${viewModel.kind} · ${viewModel.title ?? ''}`, width),
   ];
   const detailLines = [];
   if (!viewModel.unsupported) {
@@ -397,7 +394,7 @@ export function layoutViewModel(viewModel, size = {}) {
   const footerLines = wrap(FOOTER, width);
   const maximumChoiceBudget = Math.max(1, Math.min(
     7,
-    height - footerLines.length - Math.min(4, headerLines.length),
+    height - footerLines.length - headerLines.length,
   ));
   const viewport = choiceViewport(viewModel, maximumChoiceBudget, width, color);
   if (viewModel.editing && viewport.rows.length < maximumChoiceBudget) {
@@ -408,7 +405,13 @@ export function layoutViewModel(viewModel, size = {}) {
   const keptHeaders = headerLines.slice(0, Math.min(headerLines.length, remaining));
   const contentBudget = Math.max(0, remaining - keptHeaders.length);
   const currentOption = optionsFor(viewModel)[viewModel.cursor];
-  const currentDescriptionLines = currentOption ? wrap(currentOption.description, width) : [];
+  // Indent the option description a little so it reads as nested under the
+  // question rather than flush against the left edge.
+  const descriptionIndent = '  ';
+  const descriptionWidth = Math.max(1, width - descriptionIndent.length);
+  const currentDescriptionLines = currentOption
+    ? wrap(currentOption.description, descriptionWidth).map((line) => `${descriptionIndent}${line}`)
+    : [];
   const descriptionBudget = Math.min(currentDescriptionLines.length, Math.min(4, contentBudget));
   const visibleDescription = currentDescriptionLines.slice(0, descriptionBudget);
   const detailBudget = Math.max(0, contentBudget - visibleDescription.length);
@@ -420,10 +423,15 @@ export function layoutViewModel(viewModel, size = {}) {
     : keptHeaders;
   const styledDetail = color ? visibleDetail.map((line) => style(line, ANSI.bold, ANSI.yellow)) : visibleDetail;
   const styledFooter = color ? footerLines.map((line) => style(line, ANSI.dim)) : footerLines;
+  const topLines = [...styledHeaders, ...styledDetail, ...visibleDescription];
+  // A blank line separates the question/description area from the choice
+  // list, whenever there is spare room for it.
+  const marginLines = height - footerLines.length - viewport.rows.length - topLines.length > 0
+    ? ['']
+    : [];
   const lines = [
-    ...styledHeaders,
-    ...styledDetail,
-    ...visibleDescription,
+    ...topLines,
+    ...marginLines,
     ...viewport.rows,
     ...styledFooter,
   ].slice(0, height);
