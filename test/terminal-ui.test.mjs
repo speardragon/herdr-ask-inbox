@@ -150,6 +150,35 @@ test('render clamps dimensions and neutralizes control characters', () => {
   for (const line of out.split('\n')) assert.ok([...line].length <= 5 * 2);
 });
 
+test('render stays plain when color is not requested', () => {
+  const out = render(createViewModel(req()), SIZE);
+  assert.doesNotMatch(out, /\[/);
+});
+
+test('render styles the question and cursor option when color is enabled, without changing width', () => {
+  const view = createViewModel(req());
+  const colored = render(view, { ...SIZE, color: true });
+  assert.match(colored, /\[/); // has ANSI
+  assert.match(colored, /\[1m\[36m/); // bold + cyan cursor row
+  // stripping ANSI recovers the exact plain rendering (styling is width-neutral)
+  const stripped = colored.replace(/\[[0-9;]*m/gu, '');
+  assert.equal(stripped, render(view, SIZE));
+});
+
+test('render marks toggled multi-select rows in a distinct color', () => {
+  const view = createViewModel(req({
+    questions: [{
+      question: 'Which?', header: 'H',
+      options: [{ label: 'A', description: 'a' }, { label: 'B', description: 'b' }],
+      multiSelect: true,
+    }],
+  }));
+  let toggled = reduceKey(view, 'space'); // check A (cursor 0)
+  toggled = reduceKey(toggled, 'down'); // move cursor to B → A is checked but not the cursor
+  const colored = render(toggled, { ...SIZE, color: true });
+  assert.match(colored, /\[32m/); // green marks a checked row
+});
+
 test('deliverSelection publishes an answer response to the queue', async () => {
   const responded = [];
   const queue = { respond: async (r) => { responded.push(r); } };

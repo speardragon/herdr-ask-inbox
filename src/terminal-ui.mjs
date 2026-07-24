@@ -13,6 +13,19 @@ const HANDOFF_OPTION = Object.freeze({
   description: 'Return control without making a decision.',
 });
 
+// ANSI styling, applied only after width/clipping so escape codes never affect
+// layout. Off by default; the popup opts in via `size.color` (respecting NO_COLOR).
+const ANSI = {
+  reset: '[0m',
+  bold: '[1m',
+  dim: '[2m',
+  cyan: '[36m',
+  green: '[32m',
+};
+function style(text, ...codes) {
+  return `${codes.join('')}${text}${ANSI.reset}`;
+}
+
 function cloneSet(value) {
   return value instanceof Set ? new Set(value) : new Set();
 }
@@ -307,7 +320,7 @@ function boundedSize(size) {
   return { width, height };
 }
 
-function optionLine(viewModel, option, index, width) {
+function optionLine(viewModel, option, index, width, color = false) {
   const selected = viewModel.selected?.has(option.index) ? '[x]' : '[ ]';
   const marker = index === viewModel.cursor ? '›' : ' ';
   const choice = viewModel.kind === 'question'
@@ -315,10 +328,14 @@ function optionLine(viewModel, option, index, width) {
     && option.type === 'answer-option'
     ? `${marker} ${selected} ${index + 1}. `
     : `${marker} ${index + 1}. `;
-  return clipLine(`${choice}${option.label}`, width);
+  const line = clipLine(`${choice}${option.label}`, width);
+  if (!color) return line;
+  if (index === viewModel.cursor) return style(line, ANSI.bold, ANSI.cyan);
+  if (viewModel.selected?.has(option.index)) return style(line, ANSI.green);
+  return line;
 }
 
-function choiceViewport(viewModel, budget, width) {
+function choiceViewport(viewModel, budget, width, color = false) {
   const options = optionsFor(viewModel);
   if (options.length === 0 || budget <= 0) {
     return { rows: [], visibleOptionIndices: [] };
@@ -350,7 +367,7 @@ function choiceViewport(viewModel, budget, width) {
   if (start > 0 && rows.length < budget) rows.push(clipLine('↑ more choices', width));
   const visibleOptionIndices = [];
   for (let index = start; index <= end && rows.length < budget; index += 1) {
-    rows.push(optionLine(viewModel, options[index], index, width));
+    rows.push(optionLine(viewModel, options[index], index, width, color));
     visibleOptionIndices.push(index);
   }
   if (end < options.length - 1 && rows.length < budget) {
@@ -361,6 +378,7 @@ function choiceViewport(viewModel, budget, width) {
 
 export function layoutViewModel(viewModel, size = {}) {
   const { width, height } = boundedSize(size);
+  const color = size?.color === true;
   const headerLines = [
     clipLine(`Herdr Question · ${viewModel.queuePosition.index}/${viewModel.queuePosition.total}`, width),
     clipLine(`Agent ${viewModel.source.agent} · Workspace ${viewModel.source.workspace_id}`, width),
@@ -380,9 +398,10 @@ export function layoutViewModel(viewModel, size = {}) {
     7,
     height - footerLines.length - Math.min(4, headerLines.length),
   ));
-  const viewport = choiceViewport(viewModel, maximumChoiceBudget, width);
+  const viewport = choiceViewport(viewModel, maximumChoiceBudget, width, color);
   if (viewModel.editing && viewport.rows.length < maximumChoiceBudget) {
-    viewport.rows.push(clipLine(`Custom: ${viewModel.customText}`, width));
+    const customLine = clipLine(`Custom: ${viewModel.customText}`, width);
+    viewport.rows.push(color ? style(customLine, ANSI.bold, ANSI.cyan) : customLine);
   }
   const remaining = Math.max(0, height - footerLines.length - viewport.rows.length);
   const keptHeaders = headerLines.slice(0, Math.min(headerLines.length, remaining));
@@ -393,12 +412,19 @@ export function layoutViewModel(viewModel, size = {}) {
   const visibleDescription = currentDescriptionLines.slice(0, descriptionBudget);
   const detailBudget = Math.max(0, contentBudget - visibleDescription.length);
   const visibleDetail = truncatedSection(detailLines, detailBudget, width);
+  // Emphasize the queue position, the question, and de-emphasize the footer.
+  // Applied last so the styling never affects width/clipping.
+  const styledHeaders = color
+    ? keptHeaders.map((line, index) => (index === 0 ? style(line, ANSI.bold) : line))
+    : keptHeaders;
+  const styledDetail = color ? visibleDetail.map((line) => style(line, ANSI.bold)) : visibleDetail;
+  const styledFooter = color ? footerLines.map((line) => style(line, ANSI.dim)) : footerLines;
   const lines = [
-    ...keptHeaders,
-    ...visibleDetail,
+    ...styledHeaders,
+    ...styledDetail,
     ...visibleDescription,
     ...viewport.rows,
-    ...footerLines,
+    ...styledFooter,
   ].slice(0, height);
   return {
     ...viewModel,

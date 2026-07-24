@@ -33,10 +33,11 @@ function diagnostic(stderr, message) {
   }
 }
 
-function screenSize(stdout) {
+function screenSize(stdout, color = false) {
   return {
     columns: Number.isFinite(stdout.columns) ? stdout.columns : 82,
     rows: Number.isFinite(stdout.rows) ? stdout.rows : 26,
+    color,
   };
 }
 
@@ -134,6 +135,7 @@ export async function runPopup({
     diagnostic(stderr, 'the popup modal token is missing or invalid');
     return 2;
   }
+  const useColor = !env.NO_COLOR && env.TERM !== 'dumb';
 
   let liveQueue;
   let claimed = false;
@@ -179,9 +181,9 @@ export async function runPopup({
   const draw = () => {
     if (!currentView || stopped) return true;
     try {
-      currentView = layoutViewModel(currentView, screenSize(stdout));
+      currentView = layoutViewModel(currentView, screenSize(stdout, useColor));
       stdout.write(
-        `${CLEAR_SCREEN}${render(currentView, screenSize(stdout))}`,
+        `${CLEAR_SCREEN}${render(currentView, screenSize(stdout, useColor))}`,
         (error) => {
           if (error) onRuntimeFailure();
         },
@@ -264,7 +266,7 @@ export async function runPopup({
             requestStop(130);
             break;
           }
-          currentView = layoutViewModel(currentView, screenSize(stdout));
+          currentView = layoutViewModel(currentView, screenSize(stdout, useColor));
           currentView = reduceKey(currentView, key);
           draw();
           if (currentView.effect) {
