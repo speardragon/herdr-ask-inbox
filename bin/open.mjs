@@ -5,21 +5,19 @@ import { fileURLToPath } from 'node:url';
 
 import { createHerdr } from '../src/herdr.mjs';
 import { openQueue } from '../src/queue.mjs';
-import { handleAgentStatusChanged } from '../src/router.mjs';
-import { resolveQueueRoot } from './smoke.mjs';
+import { ensurePopup } from '../src/opener.mjs';
+import { resolveQueueRoot } from '../src/config.mjs';
 
+// The "open pending queue" action. If requests are waiting and no popup is alive,
+// open one; otherwise report the current state. Never waits — it is a menu action.
 export async function openPendingQueue({ env = process.env } = {}) {
-  const queue = await openQueue(await resolveQueueRoot({ env }));
+  const queue = await openQueue(await resolveQueueRoot(env));
   const requests = await queue.list();
-  const request = requests[0];
-  if (!request) return { status: 'empty' };
-  return handleAgentStatusChanged({
-    agent_status: 'blocked',
-    pane_id: request.source.pane_id,
-  }, {
-    queue,
-    herdr: createHerdr({ bin: env.HERDR_BIN_PATH || 'herdr', env }),
-  });
+  if (requests.length === 0) return { status: 'empty' };
+  const herdr = createHerdr({ bin: env.HERDR_BIN_PATH || 'herdr', env });
+  const result = await ensurePopup(queue, herdr);
+  if (result.role === 'waiter') return { status: 'already-open' };
+  return { status: result.opened ? 'opened' : 'open-failed' };
 }
 
 async function invokedAsMain() {

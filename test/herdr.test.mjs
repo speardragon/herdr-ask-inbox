@@ -67,15 +67,15 @@ test('herdr operations pass untrusted values as individual argv items', async ()
       '--agent', 'claude',
     ],
   ]);
-  for (const [index, call] of calls.entries()) {
+  for (const call of calls) {
     assert.equal(call.bin, '/fake/herdr');
-    assert.equal(call.options.timeout, index === 4 ? 0 : 5_000);
+    assert.equal(call.options.timeout, 5_000);
     assert.equal(call.options.maxBuffer, 1_048_576);
     assert.equal(call.options.shell, false);
   }
 });
 
-test('blocking popup modal has no short subprocess timeout', async () => {
+test('opening the popup uses a bounded subprocess timeout (open is non-blocking)', async () => {
   const { calls, execFile } = captureExecFile([
     { stdout: JSON.stringify({ id: 'cli:plugin', result: { type: 'ok' } }), stderr: '' },
   ]);
@@ -83,7 +83,7 @@ test('blocking popup modal has no short subprocess timeout', async () => {
 
   await api.openPopup('11111111-1111-4111-8111-111111111111');
 
-  assert.equal(calls[0].options.timeout, 0);
+  assert.equal(calls[0].options.timeout, 5_000);
   assert.equal(calls[0].options.maxBuffer, 1_048_576);
   assert.equal(calls[0].options.shell, false);
 });
