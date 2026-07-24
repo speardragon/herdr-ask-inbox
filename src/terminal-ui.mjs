@@ -389,7 +389,7 @@ export function layoutViewModel(viewModel, size = {}) {
   const height = Math.max(1, outerHeight - PADDING_Y * 2);
   const color = size?.color === true;
   const headerLines = [
-    clipLine(`Herdr Question · ${viewModel.queuePosition.index}/${viewModel.queuePosition.total}`, width),
+    clipLine(`Ask Inbox · ${viewModel.queuePosition.index}/${viewModel.queuePosition.total}`, width),
   ];
   const detailLines = [];
   if (!viewModel.unsupported) {

@@ -34,7 +34,7 @@ if (await invokedAsMain()) {
     const result = await openPendingQueue();
     process.stdout.write(`${JSON.stringify({ status: result.status })}\n`);
   } catch {
-    process.stderr.write('herdr-question: pending queue could not be opened safely\n');
+    process.stderr.write('ask-inbox: pending queue could not be opened safely\n');
     process.exitCode = 1;
   }
 }

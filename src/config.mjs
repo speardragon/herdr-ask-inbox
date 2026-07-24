@@ -3,7 +3,7 @@ import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFileCallback);
-const PLUGIN_ID = 'ray.herdr-question';
+const PLUGIN_ID = 'ray.ask-inbox';
 const MAX_CONFIG_PATH_BYTES = 16_384;
 
 function validated(path) {
@@ -21,7 +21,7 @@ function validated(path) {
 // The queue lives in the plugin's per-user config directory. Prefer the env herdr
 // injects; otherwise ask herdr for the resolved path.
 export async function resolveQueueRoot(env = process.env, execFile = execFileAsync) {
-  const configured = env.HERDR_QUESTION_CONFIG_DIR || env.HERDR_PLUGIN_CONFIG_DIR || env.HERDR_QUESTION_QUEUE_DIR;
+  const configured = env.ASK_INBOX_CONFIG_DIR || env.HERDR_PLUGIN_CONFIG_DIR || env.ASK_INBOX_QUEUE_DIR;
   if (configured) return validated(configured);
   const result = await execFile(env.HERDR_BIN_PATH || 'herdr', ['plugin', 'config-dir', PLUGIN_ID], {
     env,

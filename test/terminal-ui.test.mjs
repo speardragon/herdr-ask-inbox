@@ -133,7 +133,7 @@ test('multi-question flow advances then delivers all answers', () => {
 test('render shows the queue position, the question, choices, and the fixed footer', () => {
   const view = createViewModel(req(), { index: 2, total: 3 });
   const out = render(view, SIZE);
-  assert.match(out, /Herdr Question · 2\/3/);
+  assert.match(out, /Ask Inbox · 2\/3/);
   assert.match(out, /Which framework\?/);
   assert.match(out, /React/);
   assert.match(out, /go to agent/);

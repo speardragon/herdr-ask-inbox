@@ -1,8 +1,8 @@
-id = "ray.herdr-question"
-name = "Herdr Question"
-version = "0.1.0"
+id = "ray.ask-inbox"
+name = "Ask Inbox"
+version = "1.0.0"
 min_herdr_version = "0.7.5"
-description = "Answer blocked Claude AskUserQuestion prompts from one focused herdr popup."
+description = "Collect blocked Claude AskUserQuestion prompts from every herdr workspace into one popup, answer them in place, and never send an answer to the wrong agent."
 platforms = ["macos", "linux"]
 
 [[build]]
@@ -16,7 +16,7 @@ command = ["node", "bin/install-hooks.mjs"]
 
 [[panes]]
 id = "question"
-title = "Herdr Question"
+title = "Ask Inbox"
 placement = "popup"
 width = 82
 height = 26
@@ -24,24 +24,24 @@ command = ["node", "bin/popup.mjs"]
 
 [[actions]]
 id = "open"
-title = "Herdr Question: Open pending queue"
+title = "Ask Inbox: Open pending queue"
 contexts = ["global", "workspace", "pane"]
 command = ["node", "bin/open.mjs"]
 
 [[actions]]
 id = "install-hooks"
-title = "Herdr Question: Install or repair hooks"
+title = "Ask Inbox: Install or repair hooks"
 contexts = ["global", "workspace"]
 command = ["node", "bin/install-hooks.mjs"]
 
 [[actions]]
 id = "hook-status"
-title = "Herdr Question: Show hook status"
+title = "Ask Inbox: Show hook status"
 contexts = ["global", "workspace"]
 command = ["node", "bin/status.mjs"]
 
 [[actions]]
 id = "uninstall-hooks"
-title = "Herdr Question: Uninstall hooks"
+title = "Ask Inbox: Uninstall hooks"
 contexts = ["global", "workspace"]
 command = ["node", "bin/uninstall-hooks.mjs"]

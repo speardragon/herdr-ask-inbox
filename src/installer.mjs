@@ -15,8 +15,8 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
 
-const PLUGIN_ID = 'ray.herdr-question';
-const OWNED_MARKER = 'HERDR_QUESTION_HOOK_V1';
+const PLUGIN_ID = 'ray.ask-inbox';
+const OWNED_MARKER = 'ASK_INBOX_HOOK_V1';
 const execFileAsync = promisify(execFileCallback);
 
 function quoteShell(value) {
@@ -47,7 +47,7 @@ function isObject(value) {
 function containsMarker(group) {
   return Array.isArray(group?.hooks)
     && group.hooks.some((hook) => typeof hook?.command === 'string'
-      && /(?:^|[^A-Z0-9_])HERDR_QUESTION_HOOK_V1(?=$|[^A-Z0-9_])/.test(hook.command));
+      && /(?:^|[^A-Z0-9_])ASK_INBOX_HOOK_V1(?=$|[^A-Z0-9_])/.test(hook.command));
 }
 
 function mergeConfig(config, definitions) {
@@ -109,7 +109,7 @@ function compactTimestamp(date) {
 async function backupOriginal(path, bytes) {
   let instant = Date.now();
   while (true) {
-    const backupPath = `${path}.${compactTimestamp(new Date(instant))}.herdr-question.bak`;
+    const backupPath = `${path}.${compactTimestamp(new Date(instant))}.ask-inbox.bak`;
     try {
       const handle = await open(backupPath, 'wx', 0o600);
       try {
@@ -128,13 +128,13 @@ async function backupOriginal(path, bytes) {
 
 function unsafePathError(path, detail = 'is a symbolic link') {
   const error = new Error(`${path} ${detail}; refusing to modify agent settings`);
-  error.code = 'HERDR_QUESTION_UNSAFE_PATH';
+  error.code = 'ASK_INBOX_UNSAFE_PATH';
   return error;
 }
 
 function conflictError(path) {
   const error = new Error(`${path} changed during hook transaction; refusing to overwrite external settings`);
-  error.code = 'HERDR_QUESTION_CONFLICT';
+  error.code = 'ASK_INBOX_CONFLICT';
   return error;
 }
 
@@ -163,7 +163,7 @@ async function snapshotFile(path) {
     if (current.isSymbolicLink()) throw unsafePathError(path);
     if (current.dev !== metadata.dev || current.ino !== metadata.ino) {
       const error = new Error(`${path} changed while agent settings were being read`);
-      error.code = 'HERDR_QUESTION_CONFLICT';
+      error.code = 'ASK_INBOX_CONFLICT';
       throw error;
     }
     return {
@@ -192,7 +192,7 @@ async function assertSnapshotUnchanged(path, expected, options) {
   try {
     current = await snapshotFile(path);
   } catch (error) {
-    if (error?.code === 'HERDR_QUESTION_UNSAFE_PATH' || error?.code === 'HERDR_QUESTION_CONFLICT') {
+    if (error?.code === 'ASK_INBOX_UNSAFE_PATH' || error?.code === 'ASK_INBOX_CONFLICT') {
       throw conflictError(path);
     }
     throw error;
@@ -232,7 +232,7 @@ async function restoreMutation(mutation) {
   try {
     current = await snapshotFile(mutation.path);
   } catch (error) {
-    if (error?.code === 'HERDR_QUESTION_UNSAFE_PATH' || error?.code === 'HERDR_QUESTION_CONFLICT') {
+    if (error?.code === 'ASK_INBOX_UNSAFE_PATH' || error?.code === 'ASK_INBOX_CONFLICT') {
       return false;
     }
     throw error;
@@ -318,7 +318,7 @@ function resolveOptions(options = {}) {
 }
 
 export async function resolveCliOptions({ env = process.env, execFile = execFileAsync } = {}) {
-  let configDir = env.HERDR_QUESTION_CONFIG_DIR || env.HERDR_PLUGIN_CONFIG_DIR;
+  let configDir = env.ASK_INBOX_CONFIG_DIR || env.HERDR_PLUGIN_CONFIG_DIR;
   if (!configDir) {
     const result = await execFile(env.HERDR_BIN_PATH || 'herdr', ['plugin', 'config-dir', PLUGIN_ID], {
       timeout: 5_000,
@@ -382,7 +382,7 @@ async function configStatus(path, definitions) {
       path,
       status: 'changed',
       events: {},
-      error: error?.code === 'HERDR_QUESTION_UNSAFE_PATH'
+      error: error?.code === 'ASK_INBOX_UNSAFE_PATH'
         ? 'configuration path is unsafe'
         : 'configuration is not valid JSON',
     };

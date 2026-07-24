@@ -63,10 +63,10 @@ export async function runHook({
 function parseArguments(argv, env) {
   const options = {
     agent: undefined,
-    queueRoot: env.HERDR_QUESTION_QUEUE_DIR,
-    timeoutMs: env.HERDR_QUESTION_HOOK_TIMEOUT_MS === undefined
+    queueRoot: env.ASK_INBOX_QUEUE_DIR,
+    timeoutMs: env.ASK_INBOX_HOOK_TIMEOUT_MS === undefined
       ? DEFAULT_TIMEOUT_MS
-      : Number(env.HERDR_QUESTION_HOOK_TIMEOUT_MS),
+      : Number(env.ASK_INBOX_HOOK_TIMEOUT_MS),
   };
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];

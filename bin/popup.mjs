@@ -19,7 +19,7 @@ import {
 } from '../src/terminal-ui.mjs';
 
 const execFileAsync = promisify(execFileCallback);
-const PLUGIN_ID = 'ray.herdr-question';
+const PLUGIN_ID = 'ray.ask-inbox';
 const POPUP_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_CONFIG_PATH_BYTES = 16_384;
 const HEARTBEAT_MS = 1_000;
@@ -27,7 +27,7 @@ const CLEAR_SCREEN = '\u001b[2J\u001b[H';
 
 function diagnostic(stderr, message) {
   try {
-    stderr.write(`herdr-question: ${message}\n`);
+    stderr.write(`ask-inbox: ${message}\n`);
   } catch {
     // Diagnostics must never keep the modal lease or raw terminal active.
   }
@@ -83,7 +83,7 @@ function decodeKeys(value) {
 }
 
 async function resolveQueueRoot(env, execFile) {
-  const configured = env.HERDR_QUESTION_CONFIG_DIR || env.HERDR_PLUGIN_CONFIG_DIR;
+  const configured = env.ASK_INBOX_CONFIG_DIR || env.HERDR_PLUGIN_CONFIG_DIR;
   if (configured) {
     if (
       typeof configured !== 'string'
@@ -130,7 +130,7 @@ export async function runPopup({
     diagnostic(stderr, 'an interactive terminal is required; the pending request was not changed');
     return 2;
   }
-  const token = env.HERDR_QUESTION_POPUP_TOKEN;
+  const token = env.ASK_INBOX_POPUP_TOKEN;
   if (typeof token !== 'string' || !POPUP_TOKEN_PATTERN.test(token)) {
     diagnostic(stderr, 'the popup modal token is missing or invalid');
     return 2;

@@ -20,7 +20,7 @@ function request(id, createdAtMs, overrides = {}) {
 }
 
 async function withQueue(t) {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   return openQueue(root);
 }
@@ -42,7 +42,7 @@ test('enqueue is idempotent and list is FIFO with a stable ID tie-breaker', asyn
 });
 
 test('same-ID concurrent enqueues preserve one complete first payload', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const [leftQueue, rightQueue] = await Promise.all([openQueue(root), openQueue(root)]);
   const left = request('same', 10, { title: 'short' });
@@ -156,7 +156,7 @@ test('withPopupLock serializes competing popup work and releases afterward', asy
 });
 
 test('concurrent stale-lock recoverers never remove a new popup owner', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-stale-lock-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-stale-lock-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await seedJson(root, 'locks/popup.lock', 'owner', {
     pid: 999_999_999,
@@ -182,7 +182,7 @@ test('stale lock recovery handles current-PID fingerprints, corrupt owners, and 
   t.after(() => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
 
   async function recover(ownerContents, { oldDirectory = false } = {}) {
-    const root = await mkdtemp(join(tmpdir(), 'herdr-question-owner-'));
+    const root = await mkdtemp(join(tmpdir(), 'ask-inbox-owner-'));
     roots.push(root);
     const lockDirectory = join(root, 'locks', 'popup.lock');
     await mkdir(lockDirectory, { recursive: true });
@@ -208,7 +208,7 @@ test('stale lock recovery handles current-PID fingerprints, corrupt owners, and 
 });
 
 test('an abandoned legacy recovery guard cannot block concurrent popup recovery', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-recovery-guard-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-recovery-guard-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await seedJson(root, 'locks/popup.lock', 'owner', {
     pid: 999_999_999,
@@ -234,7 +234,7 @@ test('an abandoned legacy recovery guard cannot block concurrent popup recovery'
 });
 
 test('leftover stale quarantine cannot create an unbounded recovery loop', { timeout: 750 }, async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-stale-quarantine-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-stale-quarantine-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const staleOwner = {
     pid: 999_999_999,
@@ -252,7 +252,7 @@ test('leftover stale quarantine cannot create an unbounded recovery loop', { tim
 });
 
 test('owner publication survives concurrent stale recovery pressure', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-owner-race-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-owner-race-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const staleOwner = { pid: 999_999_999, created_at_ms: 0, token: 'stale-owner' };
   await seedJson(root, 'locks/popup.lock', 'owner', staleOwner);
@@ -275,7 +275,7 @@ test('owner publication survives concurrent stale recovery pressure', async (t) 
 });
 
 test('startup recovers abandoned request and response claims without reviving completion', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-fault-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-fault-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const response = (id) => ({
     schema_version: 1,
@@ -312,8 +312,8 @@ test('startup recovers abandoned request and response claims without reviving co
 });
 
 test('queue storage rejects symlink directories and enforces private modes', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-modes-'));
-  const outside = await mkdtemp(join(tmpdir(), 'herdr-question-outside-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-modes-'));
+  const outside = await mkdtemp(join(tmpdir(), 'ask-inbox-outside-'));
   t.after(() => Promise.all([
     rm(root, { recursive: true, force: true }),
     rm(outside, { recursive: true, force: true }),
@@ -332,7 +332,7 @@ test('queue storage rejects symlink directories and enforces private modes', asy
 });
 
 test('tombstone-only IDs do not acquire per-request recovery locks', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-tombstone-skip-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-tombstone-skip-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await seedJson(root, 'tombstones', 'complete', {
     schema_version: 1,
@@ -352,7 +352,7 @@ test('tombstone-only IDs do not acquire per-request recovery locks', async (t) =
 });
 
 test('tombstone GC bounds old entries while retaining recent duplicate protection', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-tombstone-gc-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-tombstone-gc-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1_000;
   for (let index = 0; index < 140; index += 1) {

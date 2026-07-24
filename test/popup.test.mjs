@@ -42,7 +42,7 @@ function requestFor(id, createdAt = 10) {
 }
 
 async function temporaryQueue(t) {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-popup-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-popup-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   return openQueue(root);
 }
@@ -113,7 +113,7 @@ test('non-interactive invocation reports a diagnostic and never opens or mutates
   const stderr = ttyWritable();
 
   const code = await runPopup({
-    env: { HERDR_QUESTION_POPUP_TOKEN: TOKEN },
+    env: { ASK_INBOX_POPUP_TOKEN: TOKEN },
     stdin,
     stdout,
     stderr,
@@ -138,7 +138,7 @@ test('popup claims exact modal token, restores raw mode, answers, and exits on a
   const stderr = ttyWritable();
 
   const code = await runPopup({
-    env: { HERDR_QUESTION_POPUP_TOKEN: TOKEN },
+    env: { ASK_INBOX_POPUP_TOKEN: TOKEN },
     stdin,
     stdout,
     stderr,
@@ -175,7 +175,7 @@ test('native handoff exits immediately without rendering the next FIFO request',
 
   const fifoStderr = ttyWritable();
   const code = await runPopup({
-    env: { HERDR_QUESTION_POPUP_TOKEN: TOKEN },
+    env: { ASK_INBOX_POPUP_TOKEN: TOKEN },
     stdin: ttyReadable(['g']),
     stdout,
     stderr: fifoStderr,
@@ -202,7 +202,7 @@ test('wrong modal token refuses ownership without changing pending requests', as
   const stderr = ttyWritable();
 
   const code = await runPopup({
-    env: { HERDR_QUESTION_POPUP_TOKEN: '22222222-2222-4222-8222-222222222222' },
+    env: { ASK_INBOX_POPUP_TOKEN: '22222222-2222-4222-8222-222222222222' },
     stdin,
     stdout: ttyWritable(),
     stderr,
@@ -233,7 +233,7 @@ test('SIGINT, SIGTERM, SIGHUP, SIGQUIT, and failures restore raw mode and clear 
       ? async () => { throw new Error('secret payload must not be logged'); }
       : async () => {};
     const promise = runPopup({
-      env: { HERDR_QUESTION_POPUP_TOKEN: TOKEN },
+      env: { ASK_INBOX_POPUP_TOKEN: TOKEN },
       stdin,
       stdout: ttyWritable(),
       stderr: ttyWritable(),
@@ -276,7 +276,7 @@ test('resize redraws the current request without consuming it', async (t) => {
   const stdout = ttyWritable();
   const processRef = fakeProcess();
   const promise = runPopup({
-    env: { HERDR_QUESTION_POPUP_TOKEN: TOKEN },
+    env: { ASK_INBOX_POPUP_TOKEN: TOKEN },
     stdin,
     stdout,
     stderr: ttyWritable(),
@@ -315,7 +315,7 @@ test('resize write errors, stream errors, and uncaught exceptions stop through a
     };
     const processRef = fakeProcess();
     const promise = runPopup({
-      env: { HERDR_QUESTION_POPUP_TOKEN: TOKEN },
+      env: { ASK_INBOX_POPUP_TOKEN: TOKEN },
       stdin,
       stdout,
       stderr: ttyWritable(),
@@ -364,7 +364,7 @@ test('split UTF-8 input retains a family ZWJ grapheme and backspace removes it w
   const stderr = ttyWritable();
 
   const code = await runPopup({
-    env: { HERDR_QUESTION_POPUP_TOKEN: TOKEN },
+    env: { ASK_INBOX_POPUP_TOKEN: TOKEN },
     stdin,
     stdout: ttyWritable(),
     stderr,

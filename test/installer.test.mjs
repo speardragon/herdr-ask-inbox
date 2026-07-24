@@ -9,7 +9,7 @@ import { once } from 'node:events';
 import { hookStatus, installHooks, uninstallHooks } from '../src/installer.mjs';
 
 async function setup(t) {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-question-installer-'));
+  const root = await mkdtemp(join(tmpdir(), 'ask-inbox-installer-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   return {
     root,
@@ -62,7 +62,7 @@ test('ownership marker matching does not consume unrelated command substrings', 
   const options = await setup(t);
   const unrelated = {
     matcher: 'OtherTool',
-    hooks: [{ type: 'command', command: 'printf HERDR_QUESTION_HOOK_V10' }],
+    hooks: [{ type: 'command', command: 'printf ASK_INBOX_HOOK_V10' }],
   };
   await writeJson(options.claudePath, { hooks: { PreToolUse: [unrelated] } });
 
@@ -83,7 +83,7 @@ test('installed Claude group hooks only AskUserQuestion and never PermissionRequ
   assert.equal(claude.hooks.PermissionRequest, undefined); // v2 scope: questions only
   const handler = claude.hooks.PreToolUse[0].hooks[0];
   assert.deepEqual({ type: handler.type, timeout: handler.timeout }, { type: 'command', timeout: 3600 });
-  assert.match(handler.command, /^HERDR_QUESTION_HOOK_V1=1 /);
+  assert.match(handler.command, /^ASK_INBOX_HOOK_V1=1 /);
   assert.match(handler.command, /--agent claude(?: |$)/);
   assert.match(handler.command, / --queue-root /);
 });
@@ -97,7 +97,7 @@ test('changed configuration is backed up exactly and installed files are user-on
 
   const result = await installHooks(options);
   const claudeFiles = await readdir(dirname(options.claudePath));
-  const claudeBackup = claudeFiles.find((name) => /^settings\.json\.\d{8}T\d{9}Z\.herdr-question\.bak$/.test(name));
+  const claudeBackup = claudeFiles.find((name) => /^settings\.json\.\d{8}T\d{9}Z\.ask-inbox\.bak$/.test(name));
 
   assert.ok(claudeBackup);
   assert.deepEqual(await readFile(join(dirname(options.claudePath), claudeBackup)), claudeBytes);
@@ -246,7 +246,7 @@ process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), input }));
     id: 'cli:plugin',
     result: {
       type: 'plugin_list',
-      plugins: [{ plugin_id: 'ray.herdr-question', plugin_root: pluginRoot, enabled: true }],
+      plugins: [{ plugin_id: 'ray.ask-inbox', plugin_root: pluginRoot, enabled: true }],
     },
   };
   await writeFile(herdrPath, `#!/usr/bin/env node
@@ -288,7 +288,7 @@ import { writeFile } from 'node:fs/promises';
 await writeFile(${JSON.stringify(marker)}, 'ran');
 `, { mode: 0o700 });
   const listing = {
-    result: { type: 'plugin_list', plugins: [{ plugin_id: 'ray.herdr-question', plugin_root: pluginRoot, enabled: false }] },
+    result: { type: 'plugin_list', plugins: [{ plugin_id: 'ray.ask-inbox', plugin_root: pluginRoot, enabled: false }] },
   };
   await writeFile(herdrPath, `#!/usr/bin/env node
 process.stdout.write(${JSON.stringify(JSON.stringify(listing))});
@@ -312,7 +312,7 @@ test('operator CLIs install, report, and uninstall using the Claude config home'
   const env = {
     HOME: join(options.root, 'unused-home'),
     CLAUDE_CONFIG_DIR: claudeHome,
-    HERDR_QUESTION_CONFIG_DIR: options.configDir,
+    ASK_INBOX_CONFIG_DIR: options.configDir,
   };
 
   const installed = await runCli('install-hooks.mjs', env);

@@ -47,23 +47,23 @@ test('herdr operations pass untrusted values as individual argv items', async ()
     ['agent', 'focus', 'w1:p1; touch /tmp/nope'],
     [
       'plugin', 'pane', 'open',
-      '--plugin', 'ray.herdr-question',
+      '--plugin', 'ray.ask-inbox',
       '--entrypoint', 'question',
       '--placement', 'popup',
       '--focus',
-      '--env', `HERDR_QUESTION_POPUP_TOKEN=${popupToken}`,
+      '--env', `ASK_INBOX_POPUP_TOKEN=${popupToken}`,
     ],
     ['notification', 'show', 'Needs "attention"', '--body', 'body; touch /tmp/nope', '--sound', 'request'],
     [
       'pane', 'report-agent', 'w1:p1',
-      '--source', 'ray.herdr-question',
+      '--source', 'ray.ask-inbox',
       '--agent', 'claude',
       '--state', 'blocked',
       '--agent-session-id', 'session one',
     ],
     [
       'pane', 'release-agent', 'w1:p1',
-      '--source', 'ray.herdr-question',
+      '--source', 'ray.ask-inbox',
       '--agent', 'claude',
     ],
   ]);
