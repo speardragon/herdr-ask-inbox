@@ -2,7 +2,7 @@ id = "ray.herdr-question"
 name = "Herdr Question"
 version = "0.1.0"
 min_herdr_version = "0.7.5"
-description = "Answer blocked Claude and Codex questions from one focused herdr popup."
+description = "Answer blocked Claude AskUserQuestion prompts from one focused herdr popup."
 platforms = ["macos", "linux"]
 
 [[build]]
