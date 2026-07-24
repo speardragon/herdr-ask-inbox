@@ -179,6 +179,12 @@ test('render marks toggled multi-select rows in a distinct color', () => {
   assert.match(colored, /\[32m/); // green marks a checked row
 });
 
+test('render styles the question in bold yellow when color is enabled', () => {
+  const colored = render(createViewModel(req()), { ...SIZE, color: true });
+  const YELLOW = String.fromCharCode(27) + '[33m'; // ESC[33m
+  assert.ok(colored.includes(YELLOW), 'the question line should be yellow');
+});
+
 test('deliverSelection publishes an answer response to the queue', async () => {
   const responded = [];
   const queue = { respond: async (r) => { responded.push(r); } };

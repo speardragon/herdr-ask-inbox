@@ -21,6 +21,7 @@ const ANSI = {
   dim: '[2m',
   cyan: '[36m',
   green: '[32m',
+  yellow: '[33m',
 };
 function style(text, ...codes) {
   return `${codes.join('')}${text}${ANSI.reset}`;
@@ -417,7 +418,7 @@ export function layoutViewModel(viewModel, size = {}) {
   const styledHeaders = color
     ? keptHeaders.map((line, index) => (index === 0 ? style(line, ANSI.bold) : line))
     : keptHeaders;
-  const styledDetail = color ? visibleDetail.map((line) => style(line, ANSI.bold)) : visibleDetail;
+  const styledDetail = color ? visibleDetail.map((line) => style(line, ANSI.bold, ANSI.yellow)) : visibleDetail;
   const styledFooter = color ? footerLines.map((line) => style(line, ANSI.dim)) : footerLines;
   const lines = [
     ...styledHeaders,
