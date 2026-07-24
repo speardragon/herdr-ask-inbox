@@ -77,10 +77,14 @@ test('enter confirms the cursor answer', () => {
   assert.deepEqual(next.effect.selection.value, { answers: { 'Which framework?': 'React' } });
 });
 
-test('g and escape both request a native handoff', () => {
+test('g and escape both request a native handoff, but only g asks to focus the agent', () => {
   const view = createViewModel(req());
-  assert.equal(reduceKey(view, 'g').effect.type, 'handoff');
-  assert.equal(reduceKey(view, 'escape').effect.type, 'handoff');
+  const viaG = reduceKey(view, 'g');
+  const viaEscape = reduceKey(view, 'escape');
+  assert.equal(viaG.effect.type, 'handoff');
+  assert.equal(viaEscape.effect.type, 'handoff');
+  assert.equal(viaG.effect.selection.focus, true);
+  assert.equal(viaEscape.effect.selection.focus, false);
 });
 
 test('multi-select toggles with space and joins the chosen labels on enter', () => {
@@ -143,9 +147,19 @@ test('render indents the current option description and separates choices with a
   const out = render(view, SIZE);
   const lines = out.split('\n');
   const descriptionLine = lines.find((line) => line.includes('A UI library'));
-  assert.match(descriptionLine, /^ {2}A UI library/);
+  assert.match(descriptionLine, /^ {4}A UI library/); // 2 outer padding + 2 description indent
   const choiceIndex = lines.findIndex((line) => line.includes('1. React'));
   assert.equal(lines[choiceIndex - 1], '');
+});
+
+test('render insets the whole popup: blank top/bottom rows and a left margin on every line', () => {
+  const view = createViewModel(req());
+  const out = render(view, SIZE);
+  const lines = out.split('\n');
+  assert.equal(lines[0], ''); // top padding row
+  assert.equal(lines.at(-1), ''); // bottom padding row
+  const contentLines = lines.slice(1, -1).filter((line) => line.length > 0);
+  for (const line of contentLines) assert.match(line, /^ {2}/); // left padding on every non-blank line
 });
 
 test('render clamps dimensions and neutralizes control characters', () => {
@@ -212,7 +226,7 @@ test('deliverSelection publishes an answer response to the queue', async () => {
   assert.deepEqual(responded[0].value, { answers: { 'Which framework?': 'React' } });
 });
 
-test('deliverSelection handoff responds handoff and focuses the source pane', async () => {
+test('deliverSelection handoff responds handoff and focuses the source pane by default', async () => {
   const responded = [];
   const focused = [];
   const queue = { respond: async (r) => { responded.push(r); } };
@@ -222,6 +236,22 @@ test('deliverSelection handoff responds handoff and focuses the source pane', as
   assert.equal(result.focused, true);
   assert.equal(responded[0].action, 'handoff');
   assert.deepEqual(focused, ['w1:p1']);
+});
+
+test('deliverSelection handoff with focus:false still hands off but never focuses the pane', async () => {
+  const responded = [];
+  const focused = [];
+  const queue = { respond: async (r) => { responded.push(r); } };
+  const herdr = { focusAgent: async (pane) => { focused.push(pane); } };
+  const result = await deliverSelection(
+    req(),
+    { type: 'handoff', focus: false },
+    { queue, herdr, now: () => 5_000 },
+  );
+  assert.equal(result.status, 'handed-off');
+  assert.equal(result.focused, false);
+  assert.equal(responded[0].action, 'handoff'); // the request is still released to native
+  assert.deepEqual(focused, []); // but the agent's pane is never brought into focus
 });
 
 test('deliverSelection falls back to native handoff on a malformed answer', async () => {

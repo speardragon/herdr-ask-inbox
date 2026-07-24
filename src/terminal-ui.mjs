@@ -113,12 +113,12 @@ function moved(state, delta) {
   return { ...state, cursor, effect: null, layout: null };
 }
 
-function handoffEffect(state, reason) {
+function handoffEffect(state, { reason, focus = true } = {}) {
   return {
     ...state,
     effect: {
       type: 'handoff',
-      selection: { type: 'handoff', ...(reason ? { reason } : {}) },
+      selection: { type: 'handoff', focus, ...(reason ? { reason } : {}) },
     },
   };
 }
@@ -178,7 +178,10 @@ function removeLastGrapheme(value) {
 
 export function reduceKey(state, key) {
   if (!state || typeof state !== 'object') throw new TypeError('view state is required');
-  if (key === 'g' || key === 'escape') return handoffEffect(state);
+  // 'g' explicitly asks to go to the agent's pane, so it focuses it. Escape
+  // just declines to answer here — it should not yank focus to that pane.
+  if (key === 'g') return handoffEffect(state);
+  if (key === 'escape') return handoffEffect(state, { focus: false });
   if (state.editing) {
     if (key === 'enter') return confirm(state);
     if (key === 'backspace') {
@@ -377,8 +380,13 @@ function choiceViewport(viewModel, budget, width, color = false) {
   return { rows, visibleOptionIndices };
 }
 
+const PADDING_X = 2; // left/right inset columns around the whole popup
+const PADDING_Y = 1; // top/bottom inset rows around the whole popup
+
 export function layoutViewModel(viewModel, size = {}) {
-  const { width, height } = boundedSize(size);
+  const { width: outerWidth, height: outerHeight } = boundedSize(size);
+  const width = Math.max(1, outerWidth - PADDING_X * 2);
+  const height = Math.max(1, outerHeight - PADDING_Y * 2);
   const color = size?.color === true;
   const headerLines = [
     clipLine(`Herdr Question · ${viewModel.queuePosition.index}/${viewModel.queuePosition.total}`, width),
@@ -429,19 +437,26 @@ export function layoutViewModel(viewModel, size = {}) {
   const marginLines = height - footerLines.length - viewport.rows.length - topLines.length > 0
     ? ['']
     : [];
-  const lines = [
+  const contentLines = [
     ...topLines,
     ...marginLines,
     ...viewport.rows,
     ...styledFooter,
   ].slice(0, height);
+  // Inset the whole popup from the pane edges: a left indent on every
+  // non-blank line, plus blank rows above and below. Blank lines stay blank
+  // rather than trailing whitespace.
+  const leftIndent = ' '.repeat(PADDING_X);
+  const indentedLines = contentLines.map((line) => (line.length === 0 ? line : `${leftIndent}${line}`));
+  const verticalPadding = Array.from({ length: PADDING_Y }, () => '');
+  const lines = [...verticalPadding, ...indentedLines, ...verticalPadding].slice(0, outerHeight);
   return {
     ...viewModel,
     layout: {
       request_id: viewModel.request_id,
       cursor: viewModel.cursor,
-      width,
-      height,
+      width: outerWidth,
+      height: outerHeight,
       visible_option_indices: viewport.visibleOptionIndices,
       lines,
     },
@@ -461,7 +476,7 @@ async function focusBestEffort(herdr, paneId) {
   }
 }
 
-async function handoffToNative(request, { queue, herdr, now }) {
+async function handoffToNative(request, { queue, herdr, now, focus = true }) {
   try {
     await queue.respond({
       schema_version: 1,
@@ -474,7 +489,7 @@ async function handoffToNative(request, { queue, herdr, now }) {
     // The hook may already have failed open and consumed the request; focusing
     // the source pane still returns the user to the native picker.
   }
-  const focused = await focusBestEffort(herdr, request.source.pane_id);
+  const focused = focus ? await focusBestEffort(herdr, request.source.pane_id) : false;
   return { status: 'handed-off', focused };
 }
 
@@ -488,7 +503,7 @@ export async function deliverSelection(requestValue, selection, deps) {
   if (!herdr || typeof herdr.focusAgent !== 'function') throw new TypeError('herdr API is required');
 
   if (selection.type === 'handoff') {
-    return handoffToNative(request, { queue, herdr, now });
+    return handoffToNative(request, { queue, herdr, now, focus: selection.focus !== false });
   }
   if (selection.type !== 'answer') return handoffToNative(request, { queue, herdr, now });
 
