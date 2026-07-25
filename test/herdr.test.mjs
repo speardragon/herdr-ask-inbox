@@ -47,7 +47,7 @@ test('herdr operations pass untrusted values as individual argv items', async ()
     ['agent', 'focus', 'w1:p1; touch /tmp/nope'],
     [
       'plugin', 'pane', 'open',
-      '--plugin', 'ray.ask-inbox',
+      '--plugin', 'cdragon.ask-inbox',
       '--entrypoint', 'question',
       '--placement', 'popup',
       '--focus',
@@ -56,14 +56,14 @@ test('herdr operations pass untrusted values as individual argv items', async ()
     ['notification', 'show', 'Needs "attention"', '--body', 'body; touch /tmp/nope', '--sound', 'request'],
     [
       'pane', 'report-agent', 'w1:p1',
-      '--source', 'ray.ask-inbox',
+      '--source', 'cdragon.ask-inbox',
       '--agent', 'claude',
       '--state', 'blocked',
       '--agent-session-id', 'session one',
     ],
     [
       'pane', 'release-agent', 'w1:p1',
-      '--source', 'ray.ask-inbox',
+      '--source', 'cdragon.ask-inbox',
       '--agent', 'claude',
     ],
   ]);

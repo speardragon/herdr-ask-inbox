@@ -15,7 +15,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
 
-const PLUGIN_ID = 'ray.ask-inbox';
+const PLUGIN_ID = 'cdragon.ask-inbox';
 const OWNED_MARKER = 'ASK_INBOX_HOOK_V1';
 const execFileAsync = promisify(execFileCallback);
 

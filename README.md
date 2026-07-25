@@ -6,7 +6,7 @@
 <details open>
 <summary>한국어로 보기 (클릭하여 접기)</summary>
 
-`ray.ask-inbox`는 Claude 에이전트가 `AskUserQuestion`으로 답을 기다릴 때, herdr 전체에서 하나의 FIFO 팝업으로 모아 그 자리에서 처리하는 플러그인입니다. 선택한 답변은 원래 에이전트에만 전달되며, 자동 승인은 하지 않습니다.
+`cdragon.ask-inbox`는 Claude 에이전트가 `AskUserQuestion`으로 답을 기다릴 때, herdr 전체에서 하나의 FIFO 팝업으로 모아 그 자리에서 처리하는 플러그인입니다. 선택한 답변은 원래 에이전트에만 전달되며, 자동 승인은 하지 않습니다.
 
 ![Ask Inbox 팝업에서 다른 워크스페이스의 Claude 질문에 답하는 화면](docs/popup-question.png)
 
@@ -46,13 +46,13 @@ herdr plugin link ./herdr-ask-inbox --enabled
 설치 상태는 다음 명령으로 확인합니다.
 
 ```bash
-herdr plugin action invoke hook-status --plugin ray.ask-inbox
+herdr plugin action invoke hook-status --plugin cdragon.ask-inbox
 ```
 
 대기열을 수동으로 열려면 다음 액션을 실행합니다.
 
 ```bash
-herdr plugin action invoke open --plugin ray.ask-inbox
+herdr plugin action invoke open --plugin cdragon.ask-inbox
 ```
 
 ## 팝업 조작
@@ -76,13 +76,13 @@ herdr plugin action invoke open --plugin ray.ask-inbox
 큐는 플러그인별 config directory 아래에 있습니다. 실제 경로는 다음으로 확인합니다.
 
 ```bash
-herdr plugin config-dir ray.ask-inbox
+herdr plugin config-dir cdragon.ask-inbox
 ```
 
 대기 요청·팝업이 기대대로 보이지 않으면 먼저 `hook-status`로 `installed`/`missing`/`duplicate`/`changed` 상태를 확인하세요. `changed`는 사용자가 수정한 소유 hook일 수 있으므로 자동으로 덮어쓰지 말고 백업과 설정 내용을 검토한 뒤 `install-hooks`를 다시 실행합니다.
 
 ```bash
-herdr plugin action invoke install-hooks --plugin ray.ask-inbox
+herdr plugin action invoke install-hooks --plugin cdragon.ask-inbox
 ```
 
 플러그인이 비활성(`disabled`)이면 launcher가 즉시 종료하여 hook이 네이티브 UI로 fail-open 하므로, 비활성 상태에서도 질문이 멈추지 않습니다.
@@ -92,9 +92,9 @@ herdr plugin action invoke install-hooks --plugin ray.ask-inbox
 다음 순서로 제거합니다.
 
 ```bash
-herdr plugin action invoke uninstall-hooks --plugin ray.ask-inbox
-herdr plugin action invoke hook-status --plugin ray.ask-inbox
-herdr plugin unlink ray.ask-inbox
+herdr plugin action invoke uninstall-hooks --plugin cdragon.ask-inbox
+herdr plugin action invoke hook-status --plugin cdragon.ask-inbox
+herdr plugin unlink cdragon.ask-inbox
 ```
 
 `uninstall-hooks`는 정확히 일치하는 플러그인 소유 hook만 제거합니다. 변경되었거나 중복된 marker hook은 보존하고 상태에 보고하므로, 해당 경우에는 설정과 `.ask-inbox.bak` 파일을 검토한 후 사람이 정리해야 합니다.
@@ -106,7 +106,7 @@ herdr plugin unlink ray.ask-inbox
 <details>
 <summary><strong>🇺🇸 Read in English (click to expand)</strong></summary>
 
-`ray.ask-inbox` is a herdr plugin that collects every pending `AskUserQuestion` from Claude agents — across all of herdr — into one FIFO popup you can answer right where you are. The chosen answer is delivered only to the agent that asked, and nothing is ever auto-approved.
+`cdragon.ask-inbox` is a herdr plugin that collects every pending `AskUserQuestion` from Claude agents — across all of herdr — into one FIFO popup you can answer right where you are. The chosen answer is delivered only to the agent that asked, and nothing is ever auto-approved.
 
 ![Ask Inbox popup answering a Claude question from another workspace](docs/popup-question.png)
 
@@ -146,13 +146,13 @@ The build step of install/link checks the Node version and runs the full test su
 Check the install status with:
 
 ```bash
-herdr plugin action invoke hook-status --plugin ray.ask-inbox
+herdr plugin action invoke hook-status --plugin cdragon.ask-inbox
 ```
 
 To open the pending queue manually, run:
 
 ```bash
-herdr plugin action invoke open --plugin ray.ask-inbox
+herdr plugin action invoke open --plugin cdragon.ask-inbox
 ```
 
 ## Popup controls
@@ -176,13 +176,13 @@ Only one popup is ever open across the whole herdr instance, and requests are pr
 The queue lives under the plugin's config directory. Find the actual path with:
 
 ```bash
-herdr plugin config-dir ray.ask-inbox
+herdr plugin config-dir cdragon.ask-inbox
 ```
 
 If pending requests or the popup aren't behaving as expected, first check `hook-status` for `installed`/`missing`/`duplicate`/`changed`. `changed` may mean a user-modified owned hook, so don't let it be overwritten automatically — review the backup and the config contents, then re-run `install-hooks`.
 
 ```bash
-herdr plugin action invoke install-hooks --plugin ray.ask-inbox
+herdr plugin action invoke install-hooks --plugin cdragon.ask-inbox
 ```
 
 If the plugin is `disabled`, the launcher exits immediately and the hook fails open to the native UI, so questions never hang even while the plugin is off.
@@ -192,9 +192,9 @@ If the plugin is `disabled`, the launcher exits immediately and the hook fails o
 Remove the plugin in this order:
 
 ```bash
-herdr plugin action invoke uninstall-hooks --plugin ray.ask-inbox
-herdr plugin action invoke hook-status --plugin ray.ask-inbox
-herdr plugin unlink ray.ask-inbox
+herdr plugin action invoke uninstall-hooks --plugin cdragon.ask-inbox
+herdr plugin action invoke hook-status --plugin cdragon.ask-inbox
+herdr plugin unlink cdragon.ask-inbox
 ```
 
 `uninstall-hooks` only removes plugin-owned hooks that match exactly. Any changed or duplicate marker hook is preserved and reported in the status instead, in which case a human needs to review the config and the `.ask-inbox.bak` file and clean it up manually.

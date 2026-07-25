@@ -1,4 +1,4 @@
-id = "ray.ask-inbox"
+id = "cdragon.ask-inbox"
 name = "Ask Inbox"
 version = "1.0.0"
 min_herdr_version = "0.7.5"

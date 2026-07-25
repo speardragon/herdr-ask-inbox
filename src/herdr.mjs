@@ -2,7 +2,7 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFileCallback);
-const PLUGIN_ID = 'ray.ask-inbox';
+const PLUGIN_ID = 'cdragon.ask-inbox';
 const TIMEOUT_MS = 5_000;
 const MAX_BUFFER_BYTES = 1_048_576;
 const MAX_KEYS = 32;

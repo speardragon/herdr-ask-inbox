@@ -3,7 +3,7 @@ import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFileCallback);
-const PLUGIN_ID = 'ray.ask-inbox';
+const PLUGIN_ID = 'cdragon.ask-inbox';
 const MAX_CONFIG_PATH_BYTES = 16_384;
 
 function validated(path) {

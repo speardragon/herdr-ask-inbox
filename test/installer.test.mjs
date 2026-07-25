@@ -246,7 +246,7 @@ process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), input }));
     id: 'cli:plugin',
     result: {
       type: 'plugin_list',
-      plugins: [{ plugin_id: 'ray.ask-inbox', plugin_root: pluginRoot, enabled: true }],
+      plugins: [{ plugin_id: 'cdragon.ask-inbox', plugin_root: pluginRoot, enabled: true }],
     },
   };
   await writeFile(herdrPath, `#!/usr/bin/env node
@@ -288,7 +288,7 @@ import { writeFile } from 'node:fs/promises';
 await writeFile(${JSON.stringify(marker)}, 'ran');
 `, { mode: 0o700 });
   const listing = {
-    result: { type: 'plugin_list', plugins: [{ plugin_id: 'ray.ask-inbox', plugin_root: pluginRoot, enabled: false }] },
+    result: { type: 'plugin_list', plugins: [{ plugin_id: 'cdragon.ask-inbox', plugin_root: pluginRoot, enabled: false }] },
   };
   await writeFile(herdrPath, `#!/usr/bin/env node
 process.stdout.write(${JSON.stringify(JSON.stringify(listing))});

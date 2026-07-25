@@ -19,7 +19,7 @@ import {
 } from '../src/terminal-ui.mjs';
 
 const execFileAsync = promisify(execFileCallback);
-const PLUGIN_ID = 'ray.ask-inbox';
+const PLUGIN_ID = 'cdragon.ask-inbox';
 const POPUP_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_CONFIG_PATH_BYTES = 16_384;
 const HEARTBEAT_MS = 1_000;

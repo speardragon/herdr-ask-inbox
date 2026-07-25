@@ -36,6 +36,6 @@ test('manifest build pipeline checks Node, tests, and idempotently installs hook
 test('operator README uses herdr 0.7.5 action argument order', async () => {
   const text = await readFile(new URL('../README.md', import.meta.url), 'utf8');
   for (const action of ['hook-status', 'open', 'install-hooks', 'uninstall-hooks']) {
-    assert.match(text, new RegExp(`herdr plugin action invoke ${action} --plugin ray\\.ask-inbox`));
+    assert.match(text, new RegExp(`herdr plugin action invoke ${action} --plugin cdragon\\.ask-inbox`));
   }
 });
