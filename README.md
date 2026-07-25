@@ -1,10 +1,10 @@
 # Ask Inbox
 
 <a id="korean"></a>
-**🇰🇷 한국어** ｜ [🇺🇸 English](#english)
+[🇰🇷 한국어](#korean) ｜ **🇺🇸 English**
 
-<details open>
-<summary>한국어로 보기 (클릭하여 접기)</summary>
+<details>
+<summary>한국어로 보기 (Click to expand Korean)</summary>
 
 `cdragon.ask-inbox`는 Claude 에이전트가 `AskUserQuestion`으로 답을 기다릴 때, herdr 전체에서 하나의 FIFO 팝업으로 모아 그 자리에서 처리하는 플러그인입니다. 선택한 답변은 원래 에이전트에만 전달되며, 자동 승인은 하지 않습니다.
 
@@ -103,8 +103,8 @@ herdr plugin unlink cdragon.ask-inbox
 
 <a id="english"></a>
 
-<details>
-<summary><strong>🇺🇸 Read in English (click to expand)</strong></summary>
+<details open>
+<summary><strong>🇺🇸 English</strong></summary>
 
 `cdragon.ask-inbox` is a herdr plugin that collects every pending `AskUserQuestion` from Claude agents — across all of herdr — into one FIFO popup you can answer right where you are. The chosen answer is delivered only to the agent that asked, and nothing is ever auto-approved.
 
